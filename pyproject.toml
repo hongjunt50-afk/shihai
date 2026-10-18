@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shihai"
+version = "0.2.0"
+description = "识海 — a memory layer that forgets, consolidates, and grows a personality for LLM agents. 性格不是设定的, 是被记住的。"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+keywords = ["agent", "memory", "personality", "llm", "psychology"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# 纯标准库, 零依赖 —— 这是刻意的: 换电脑 = 拷目录
+[project.scripts]
+shihai = "shihai.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["shihai*"]

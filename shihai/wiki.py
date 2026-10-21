@@ -191,6 +191,69 @@ class Wiki:
         # 缺页: 有日记但没有主题页对应的重复主题
         return issues
 
+    # -- ingest: 反向闭环(改 md → 回写库) --------------------------------
+    def ingest_edits(self):
+        """扫描 wiki/ 下被人改过的页面, 把改动写回 SQLite。
+
+        这是 sync 的反向: sync 是从库往外投影, ingest 是把人在 Markdown 里的
+        修订收回库。两边的文件 mtime 比库里的 updated 新, 就认为是人改的。
+
+        三类页面各有回写方式:
+            wiki/self/*.md   → self_knowledge(整页替换该 kind)
+            wiki/days/*.md   → diary(按日期, 标 edited=1 保护)
+            wiki/topics/*.md → 只读提示(主题页是派生页, 不反向写)
+        """
+        self.ensure()
+        stats = {"self_pages": 0, "days": 0, "skipped": []}
+        wikidir = os.path.join(self.root, "wiki")
+
+        # 自我知识页: 整页成批回写(页面是"某类自我知识"的全部内容)
+        selfdir = os.path.join(wikidir, "self")
+        from .kb import KINDS
+        for fn in os.listdir(selfdir) if os.path.isdir(selfdir) else []:
+            if not fn.endswith(".md"):
+                continue
+            kind = fn[:-3]
+            if kind not in KINDS:
+                stats["skipped"].append(fn)
+                continue
+            path = os.path.join(selfdir, fn)
+            items = _parse_bullets(open(path, encoding="utf-8").read())
+            if not items:
+                continue
+            existing = {r["text"] for r in self.store.self_knowledge(kind=kind)}
+            added = 0
+            for text in items:
+                if text in existing:
+                    continue
+                # 人在 wiki 里写的条目, 置信度高(人亲自确认过)
+                self.store.learn_self(kind, text, source="human-wiki", init=0.7)
+                added += 1
+            if added:
+                stats["self_pages"] += 1
+
+        # 日记页: 按日期回写正文, 标记 edited=1(机器此后不再覆盖)
+        daydir = os.path.join(wikidir, "days")
+        for fn in os.listdir(daydir) if os.path.isdir(daydir) else []:
+            if not fn.endswith(".md"):
+                continue
+            day = fn[:-3]
+            path = os.path.join(daydir, fn)
+            raw = open(path, encoding="utf-8").read()
+            body = _strip_meta(raw)
+            if not body:
+                continue
+            row = self.store.diary_of(day)
+            if row is None:
+                self.store.add_diary(day, body, mood="平静")
+                stats["days"] += 1
+            elif body.strip() != (row["text"] or "").strip():
+                self.store.edit_diary(day, text=body.strip())
+                stats["days"] += 1
+
+        self._log("ingest", "%d 自我页 / %d 日记页" % (stats["self_pages"], stats["days"]))
+        return stats
+
     def lint_report(self):
         i = self.lint()
         lines = ["# wiki 体检", ""]
@@ -206,6 +269,31 @@ class Wiki:
             lines.append("没有发现问题。")
         self._log("lint", "%d 问题" % sum(len(v) for v in i.values()))
         return "\n".join(lines)
+
+
+def _parse_bullets(text):
+    """从 markdown 里抽 `- 内容` 行, 去掉机器加的 (_稳固度 ..._) 后缀。"""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith(("- ", "* ")):
+            continue
+        body = line[2:].strip()
+        body = re.sub(r"\s*_\(.*?\)_\s*$", "", body)   # 去掉机器元信息
+        if body and len(body) > 2:
+            out.append(body)
+    return out
+
+
+def _strip_meta(text):
+    """去掉标题行、`>` 引用行(机器生成的心智元信息)和 wiki 链接。"""
+    lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("# ") or s.startswith(">") or s.startswith("[[") or not s:
+            continue
+        lines.append(line)
+    return chr(10).join(lines).strip()
 
 
 def _slug(s):

@@ -81,6 +81,9 @@ class ShihaiService:
         cue = Cue(text=a.get("query", ""), person=a.get("person", ""),
                   theme=a.get("theme", ""), state=a.get("state", ""),
                   task=a.get("task", ""))
+        if a.get("all"):
+            # 三层召回: 经历 + 语义事实 + 自我知识
+            return self.recall.recall_all(cue, limit=int(a.get("limit", 5)))
         hits = self.recall.recall(cue, limit=int(a.get("limit", 5)))
         return {"hits": [{"id": h.event_id, "score": h.score, "core": h.core,
                           "emotion": h.emotion, "summary": h.summary,
@@ -250,6 +253,8 @@ class ShihaiService:
         action = a.get("action", "sync")
         if action == "sync":
             return self.wiki.sync()
+        if action == "ingest":
+            return self.wiki.ingest_edits()
         if action == "lint":
             return {"report": self.wiki.lint_report()}
         if action == "index":

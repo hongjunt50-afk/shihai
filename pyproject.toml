@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shihai"
-version = "0.2.0"
+version = "0.6.0"
 description = "识海 — a memory layer that forgets, consolidates, and grows a personality for LLM agents. 性格不是设定的, 是被记住的。"
 readme = "README.md"
 requires-python = ">=3.8"

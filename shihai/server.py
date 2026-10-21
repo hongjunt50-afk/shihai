@@ -37,6 +37,7 @@ from .freemode import FreeMode
 from .kb import SelfKB
 from .diary import DiaryEngine
 from .wiki import Wiki
+from .viz import render as render_viz
 from . import home as H
 
 
@@ -257,12 +258,20 @@ class ShihaiService:
                     "content": open(path, encoding="utf-8").read() if os.path.exists(path) else ""}
         return {"root": self.wiki.root}
 
+    def h_viz(self, a):
+        """生成单文件 HTML 可视化仪表盘。"""
+        path = a.get("path") or os.path.join(H.SHIHAI_HOME, "viz", "shihai.html")
+        p, size = render_viz(self.store, path, persona_engine=self.persona,
+                             typology_engine=self.typology)
+        return {"path": p, "bytes": size}
+
     HANDLERS = {
         "tell": h_tell, "ask": h_ask, "tick": h_tick, "context": h_context,
         "persona": h_persona, "freemode": h_freemode, "stats": h_stats,
         "selflearn": h_selflearn, "selfkb": h_selfkb, "selfconfirm": h_selfconfirm,
         "bootstrap": h_bootstrap, "selfmaint": h_selfmaint,
         "diary": h_diary, "warmth": h_warmth, "wiki": h_wiki,
+        "viz": h_viz,
     }
 
     def dispatch(self, method, args=None):

@@ -81,6 +81,20 @@ def main(argv=None):
     f.add_argument("action", choices=["on", "off", "status", "run"])
     f.add_argument("--cycles", type=int, default=1)
 
+    sl = sub.add_parser("selflearn", help="学一条关于自己的事(工作内容请走共享知识库)")
+    sl.add_argument("text")
+    sl.add_argument("--kind", choices=["identity", "care", "style", "voice", "moment"])
+    sl.add_argument("--trigger", default=None)
+
+    sk = sub.add_parser("selfkb", help="查看自我知识库")
+    sk.add_argument("--kind", choices=["identity", "care", "style", "voice", "moment"])
+    sk.add_argument("--min", type=float, default=0.0)
+
+    b = sub.add_parser("bootstrap", help="冷启动自举块: 新对话无需重教")
+    b.add_argument("--min", type=float, default=0.12)
+
+    sm = sub.add_parser("selfmaint", help="维护自我知识库(衰减+回收)")
+
     a = p.parse_args(argv)
 
     svc = ShihaiService()
@@ -105,6 +119,32 @@ def main(argv=None):
         ok, r = svc.dispatch("tick", {"days": a.days, "free_cycles": a.free})
         print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
         return 0 if ok else 1
+    elif a.cmd == "selflearn":
+        ok, r = svc.dispatch("selflearn", {"text": a.text, "kind": a.kind,
+                                          "trigger": a.trigger})
+        print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        return 0 if ok else 1
+    elif a.cmd == "selfkb":
+        ok, r = svc.dispatch("selfkb", {"kind": a.kind, "min": a.min})
+        for it in r["items"]:
+            print("[%s] p=%.2f uses=%d win/lose=%d/%d  %s"
+                  % (it["kind"], it["plasticity"], it["uses"],
+                     it["wins"], it["losses"], it["text"]))
+        return 0
+    elif a.cmd == "bootstrap":
+        ok, r = svc.dispatch("bootstrap", {"min": a.min})
+        print("<!-- shihai:selfbegin 自我知识库(可塑性记忆) -->")
+        print(r["block"])
+        if r["weak"]:
+            weak_text = ", ".join(w["text"] for w in r["weak"][:3])
+            print("")
+            print("(这些我快忘了, 需要就再告诉我一次: %s)" % weak_text)
+        print("<!-- shihai:selfend -->")
+        return 0
+    elif a.cmd == "selfmaint":
+        ok, r = svc.dispatch("selfmaint", {})
+        print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        return 0
     elif a.cmd == "freemode":
         action = {"on": "on", "off": "off", "status": "status", "run": "run"}[a.action]
         ok, r = svc.dispatch("freemode", {"action": action, "cycles": a.cycles})

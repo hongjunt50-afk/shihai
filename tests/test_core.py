@@ -309,6 +309,26 @@ def test_wiki_sync_and_lint():
         store.close()
 
 
+def test_viz_renders():
+    """viz: 生成单文件 HTML, 无未替换占位符, 数据可解析。"""
+    import json as _json, re as _re
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        ing.ingest(Observation("用户带我去公园看猫, 我很开心"), importance_hint=0.9)
+        life.tick(persona=pers)
+        from shihai.viz import render
+        path, size = render(store, os.path.join(tmp, "v.html"), persona_engine=pers)
+        html = open(path, encoding="utf-8").read()
+        assert size > 5000 and 'id="graph"' in html
+        for ph in ("__NAME__", "__SUB__", "__GEN__", "__DATA__"):
+            assert ph not in html, "占位符未替换: %s" % ph
+        m = _re.search(r"const D = (.+?);\s*const NS", html, _re.S)
+        assert m, "内嵌数据块缺失"
+        d = _json.loads(m.group(1))
+        assert d["overview"]["events"] >= 1
+        store.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

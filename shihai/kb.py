@@ -44,10 +44,11 @@ BUDGET = {
 }
 
 # 工作类内容的判别词: 命中即路由到共享知识库, 不进识海
+# 只留强工作信号词(具体技术名词); "文档/测试/版本/配置"这类弱词会误杀
+# "我做事喜欢先看文档" 这种行事风格描述, 已移除。
 _WORK_HINTS = (
     "python", "代码", "报错", "依赖", "部署", "接口", "数据库", "sql", "api",
-    "仓库", "分支", "编译", "测试", "版本", "文档", "安装", "配置", "命令",
-    "框架", "库", "算法", "架构", "服务器", "端口", "日志",
+    "仓库", "分支", "编译", "框架", "算法", "架构", "服务器", "端口", "日志",
 )
 _SELF_HINTS = (
     "我是", "我叫", "我喜欢", "我不喜欢", "我在意", "我在乎", "我讨厌",
@@ -64,11 +65,27 @@ class Bootstrap:
     weak: list = field(default_factory=list)   # 可塑性偏低、快被忘掉的(提醒一下)
 
 
+# 表达"这是我的属性/习惯"的句式(优先于工作词判定)
+_TRAIT_PATTERNS = (
+    "我喜欢", "我不喜欢", "我讨厌", "我习惯", "我总是", "我从不", "我会先",
+    "我做事", "我的风格", "我的原则", "对我来说",
+)
+# 表达"这是工作要求/业务规则"的句式(即使含"我要求", 也属于工作)
+_DUTY_PATTERNS = ("必须", "接口", "字段", "接口必须", "规范要求", "业务要求", "上线前")
+
+
 def classify(text):
     """判定一条内容该进哪里。返回 (kind|None, reason)。
-    kind=None 表示"这不是我的事", 应路由到共享知识库。"""
+    kind=None 表示"这不是我的事", 应路由到共享知识库。
+
+    判定顺序(2026-10-18 修): 先问"这句话描述的是我的属性, 还是活的要求?"
+    —— 属性优先, 否则"我要求接口必须加鉴权"会被误当行事风格。"""
     t = text.lower()
-    if any(k in t for k in _WORK_HINTS) and not any(s in t for s in _SELF_HINTS):
+    is_trait = any(p in text for p in _TRAIT_PATTERNS)
+    is_duty = any(p in text for p in _DUTY_PATTERNS)
+    if is_duty and not is_trait:
+        return None, "工作要求 → 共享知识库"
+    if any(k in t for k in _WORK_HINTS) and not is_trait and not any(s in text for s in _SELF_HINTS):
         return None, "work/other → 共享知识库"
     if any(k in text for k in ("我的名字", "我叫", "我是")):
         return "identity", "关于我是谁"
@@ -76,7 +93,8 @@ def classify(text):
         return "care", "关于我在意什么"
     if any(k in text for k in ("别叫", "要叫", "称呼", "说话", "口吻", "客套", "语气")):
         return "voice", "关于我怎么说话"
-    if any(k in text for k in ("我习惯", "我要求", "以后", "总是", "不要用", "按照")):
+    if any(k in text for k in ("我习惯", "我要求", "以后", "总是", "不要用", "按照",
+                               "我做事", "我的风格", "我的原则", "我会先")):
         return "style", "关于我怎么行事"
     if any(k in text for k in ("那天", "第一次", "我们一起", "你答应", "你记得吗")):
         return "moment", "我们的点滴"

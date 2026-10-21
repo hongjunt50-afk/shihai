@@ -39,6 +39,10 @@ def _render_context_block(r):
         lines.append("")
         lines.append("## 关于我自己(可塑性记忆)")
         lines.append(r["selfkb"])
+    if r.get("diary"):
+        lines.append("")
+        lines.append("## 我记得那几天")
+        lines.append(r["diary"])
     t = r["typology"]
     lines.append("")
     lines.append("类型档案: 荣格主导 %s | 九型 %s | 健康度 %.2f(%s)"
@@ -99,6 +103,19 @@ def main(argv=None):
 
     sm = sub.add_parser("selfmaint", help="维护自我知识库(衰减+回收)")
 
+    d = sub.add_parser("diary", help="日记: 收日/查看/回忆/导出/导入")
+    d.add_argument("action", choices=["close", "recent", "recall", "export", "import", "compose"],
+                   nargs="?", default="recent")
+    d.add_argument("--day")
+    d.add_argument("--query", default="")
+    d.add_argument("--limit", type=int, default=5)
+    d.add_argument("--path")
+
+    w = sub.add_parser("warmth", help="好感条(只允许人录入)")
+    w.add_argument("--add", type=float)
+    w.add_argument("--day")
+    w.add_argument("--reason", default="")
+
     a = p.parse_args(argv)
 
     svc = ShihaiService()
@@ -148,6 +165,30 @@ def main(argv=None):
     elif a.cmd == "selfmaint":
         ok, r = svc.dispatch("selfmaint", {})
         print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        return 0
+    elif a.cmd == "diary":
+        ok, r = svc.dispatch("diary", {"action": a.action, "day": a.day,
+                                       "query": a.query, "limit": a.limit,
+                                       "path": a.path})
+        if a.action == "close":
+            print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        elif a.action in ("recent", "recall"):
+            for d in r.get("days", []):
+                print("## %s  %s" % (d["day"], d.get("mood") or ""))
+                print(d["text"])
+                if d.get("felt"):
+                    print("> 当时: %s" % d["felt"])
+                print()
+        elif a.action == "compose":
+            print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False, indent=1))
+        else:
+            print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        return 0
+    elif a.cmd == "warmth":
+        ok, r = svc.dispatch("warmth", {"action": "add" if a.add is not None else "status",
+                                        "day": a.day, "delta": a.add or 0,
+                                        "reason": a.reason})
+        print("好感累计: %+.1f" % r["total"])
         return 0
     elif a.cmd == "freemode":
         action = {"on": "on", "off": "off", "status": "status", "run": "run"}[a.action]

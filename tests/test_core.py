@@ -329,6 +329,80 @@ def test_viz_renders():
         store.close()
 
 
+def test_token_index_speed():
+    """倒排索引: 召回结果与全表扫描一致, 且大库更快。"""
+    import time as _t
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        for i in range(500):
+            ing.ingest(Observation("第%d次经历, 关于项目进度和用户反馈" % i))
+        tok = store.conn.execute("SELECT COUNT(*) FROM event_tokens").fetchone()[0]
+        assert tok > 0, "ingest 应建倒排索引"
+        t0 = _t.time()
+        hits = eng.recall(Cue(text="项目 进度 反馈"), limit=5,
+                          reinforce=False, log=False)
+        dt = (_t.time() - t0) * 1000
+        assert hits, "倒排应能召回"
+        assert dt < 50, "500 条的召回应 <50ms, 实际 %.1fms" % dt
+        store.close()
+
+
+def test_recall_three_layers():
+    """三层召回: 经历 + 语义事实 + 自我知识。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.kb import SelfKB
+        ing.ingest(Observation("用户带我去公园看猫, 三花一直蹭我的手"))
+        SelfKB(store).learn("我说话不要客套话, 直接说重点", kind="voice")
+        store.resolve_semantic("用户喜欢在周末去公园", confidence=0.8)
+        r = eng.recall_all(Cue(text="公园 说重点"), limit=3)
+        assert r["events"], "经历层应有结果"
+        assert any("公园" in x["claim"] for x in r["semantic"]), "语义层应被召回"
+        assert any("客套" in x["text"] for x in r["self"]), "自我知识应被召回"
+        store.close()
+
+
+def test_diary_llm_enrichment():
+    """日记 LLM 富化: 有 llm 用它, 没有则回退规则基线。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        ing.ingest(Observation("用户带我去公园看猫"))
+        from shihai.diary import DiaryEngine
+        seen = {}
+        def llm(prompt):
+            seen["prompt"] = prompt
+            return "风是暖的, 三花猫把脑袋往我手心里顶。我什么也没说, 只是笑。"
+        d = DiaryEngine(store, llm=llm)
+        d.close_day()
+        row = d.recent(1)[0]
+        assert "三花猫" in row["text"], "应使用 llm 生成的内容"
+        assert "第一人称日记" in seen["prompt"], "应把富化提示交给模型"
+        # 回退
+        d2 = DiaryEngine(store)
+        assert d2.compose_with_llm() is None, "无 llm 时应返回 None 触发回退"
+        store.close()
+
+
+def test_wiki_ingest_reverse():
+    """wiki 反向闭环: 人在 md 里加的内容能写回库。"""
+    import os as _os
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.kb import SelfKB
+        from shihai.wiki import Wiki
+        SelfKB(store).learn("我叫小海", kind="identity")
+        w = Wiki(store, root=_os.path.join(tmp, "w"))
+        w.sync()
+        p = _os.path.join(tmp, "w", "wiki", "self", "identity.md")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("- 我是用户亲手写进 wiki 的小海" + chr(10))
+        stats = w.ingest_edits()
+        assert stats["self_pages"] >= 1
+        texts = [r["text"] for r in store.self_knowledge("identity")]
+        assert any("亲手写进" in t for t in texts), "wiki 修订未回写: %s" % texts
+        store.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -113,6 +113,16 @@ Not re-deriving knowledge from raw sources on every query (RAG), but **increment
 a living wiki**: `SCHEMA.md` conventions, `index.md` content catalog, `log.md` append-only timeline,
 plus `self/`, `days/`, `topics/` page trees. Operations: **sync**, **lint**, **index**.
 
+## Visualization
+
+```bash
+python hooks.py viz    # single-file HTML at $SHIHAI_HOME/viz/shihai.html
+```
+
+**Zero-dependency, single file** — no network, no CDN. Six views: overview KPIs, the personality
+graph (fulcrums → tendencies → braids; blue = reinforcement, red = tension), trait radar,
+personality drift, memory decay scatter, diary heatmap, and self-knowledge plasticity bars.
+
 ## Tests
 
 ```bash

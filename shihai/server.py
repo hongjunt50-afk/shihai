@@ -85,6 +85,8 @@ class ShihaiService:
         rep = self.lifecycle.tick(days=days)
         out = {"decayed": rep.decayed, "dormant": rep.dormant,
                "promoted": rep.promoted, "reflected": rep.reflected}
+        # 自我知识随 tick 一并衰减/回收 —— 不要求人记得单独跑 selfmaint
+        out["selfkb"] = self.kb.maintain(decay=True)
         # tick 顺带刷人格快照 —— 固结与投影保持同步
         self.persona.refresh()
         # 自由模式: 常驻服务默认每天跑几个行为环(cron 触发 tick 时自然发生)
@@ -112,9 +114,11 @@ class ShihaiService:
             Cue(text=a.get("query", "")), limit=int(a.get("limit", 4)))
         tasks = self.store.open_tasks()
         profile = self.typology.infer(persist=True)
+        boot = self.kb.bootstrap()
         return {
             "persona": card,
             "voice": voice,
+            "selfkb": boot.block,
             "typology": {"dominant": profile.jung_dominant,
                          "ennea": "%dw%d" % (profile.ennea_type, profile.ennea_wing),
                          "health": profile.health, "drift": profile.drift_direction},

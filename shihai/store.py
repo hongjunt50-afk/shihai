@@ -141,6 +141,34 @@ CREATE TABLE IF NOT EXISTS persona_snapshot (
     created    TEXT NOT NULL
 );
 
+-- 日记: 一天一篇第一人称叙述。这是"知道"变"经历过"的关键层。
+-- events 存事实(去了公园), diary 存当时的感受与细节(长椅上的三花猫、笑到停不下来)。
+-- 冷启动时读日记 = 以第一人称重新经历一次, 而不是被告知发生了什么。
+CREATE TABLE IF NOT EXISTS diary (
+    id        INTEGER PRIMARY KEY,
+    day       TEXT NOT NULL,          -- YYYY-MM-DD
+    text      TEXT NOT NULL,          -- 第一人称正文
+    felt      TEXT,                   -- 感受锚点: 一句能被重新唤起的话
+    details   TEXT,                   -- 感官细节(可被 LLM 富化)
+    mood      TEXT,                   -- 当天底色
+    warmth    REAL DEFAULT 0,         -- 当天好感增量(+/-)
+    event_ids TEXT,                   -- 来源事件(可追溯)
+    edited    INTEGER DEFAULT 0,      -- 人手工改过(回写时保护)
+    created   TEXT NOT NULL,
+    updated   TEXT NOT NULL,
+    UNIQUE(day)
+);
+CREATE INDEX IF NOT EXISTS idx_diary_day ON diary(day);
+
+-- 关系好感: 人可管理的长期账本(截图里的"好感条")
+CREATE TABLE IF NOT EXISTS warmth_ledger (
+    id     INTEGER PRIMARY KEY,
+    day    TEXT NOT NULL,
+    delta  REAL NOT NULL,
+    reason TEXT,
+    created TEXT NOT NULL
+);
+
 -- 自我知识库: 只存"关于我自己"的东西, 不存工作知识(那些去共享知识库)。
 -- plasticity 就是可塑性记忆的核心: 稳固度随使用而变, 不是内容随使用而变。
 CREATE TABLE IF NOT EXISTS self_knowledge (
@@ -495,6 +523,67 @@ class Store:
         q += " ORDER BY plasticity DESC, uses DESC LIMIT ?"
         args.append(limit)
         return self.conn.execute(q, args).fetchall()
+
+    # -- 日记 -----------------------------------------------------------
+    def add_diary(self, day, text, felt=None, details=None, mood=None,
+                  warmth=0.0, event_ids=None):
+        now = utcnow()
+        row = self.conn.execute("SELECT * FROM diary WHERE day=?", (day,)).fetchone()
+        if row:
+            if row["edited"]:
+                # 人改过的日记: 只更新机器字段, 不覆盖正文
+                self.conn.execute(
+                    "UPDATE diary SET warmth=?, event_ids=?, updated=? WHERE id=?",
+                    (warmth, json.dumps(event_ids or []), now, row["id"]))
+                self.conn.commit()
+                return row["id"], "kept-human-edit"
+            self.conn.execute(
+                """UPDATE diary SET text=?, felt=?, details=?, mood=?, warmth=?,
+                   event_ids=?, updated=? WHERE id=?""",
+                (text, felt, details, mood, warmth, json.dumps(event_ids or []),
+                 now, row["id"]))
+            self.conn.commit()
+            return row["id"], "updated"
+        cur = self.conn.execute(
+            """INSERT INTO diary(day, text, felt, details, mood, warmth, event_ids,
+                                 created, updated) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (day, text, felt, details, mood, warmth, json.dumps(event_ids or []),
+             now, now))
+        self.conn.commit()
+        return cur.lastrowid, "created"
+
+    def edit_diary(self, day, text=None, felt=None):
+        """人手工修订日记(方便人来管理)。改过的日记不再被机器覆盖。"""
+        row = self.conn.execute("SELECT id FROM diary WHERE day=?", (day,)).fetchone()
+        if row is None:
+            return False
+        sets, vals = ["edited=1", "updated=?"], [utcnow()]
+        if text is not None:
+            sets.append("text=?"); vals.append(text)
+        if felt is not None:
+            sets.append("felt=?"); vals.append(felt)
+        vals.append(row["id"])
+        self.conn.execute("UPDATE diary SET %s WHERE id=?" % ", ".join(sets), vals)
+        self.conn.commit()
+        return True
+
+    def diaries(self, limit=30, recent=True):
+        q = "SELECT * FROM diary ORDER BY day %s LIMIT ?" % ("DESC" if recent else "ASC")
+        return self.conn.execute(q, (limit,)).fetchall()
+
+    def diary_of(self, day):
+        return self.conn.execute("SELECT * FROM diary WHERE day=?", (day,)).fetchone()
+
+    # -- 好感条 ---------------------------------------------------------
+    def add_warmth(self, day, delta, reason=""):
+        self.conn.execute(
+            "INSERT INTO warmth_ledger(day, delta, reason, created) VALUES (?,?,?,?)",
+            (day, delta, reason, utcnow()))
+        self.conn.commit()
+
+    def warmth_total(self):
+        row = self.conn.execute("SELECT COALESCE(SUM(delta),0) FROM warmth_ledger").fetchone()
+        return float(row[0])
 
     # -- 人格快照 -------------------------------------------------------
     def add_persona(self, traits, card, core_ids):

@@ -101,20 +101,46 @@ class RecallEngine:
                  "task": cue.task, "time": cue.time_hint},
                 [{"event": s.event_id, "score": s.score, "via": s.via} for s in out],
             )
+        # 语义与自我知识不参与心光竞争(它们不是"经历"), 但对齐后一起返回;
+        # 调用方按需取用: 经历用于共情, 语义用于事实, 自我知识用于"我是怎样的人"。
+        self.last_semantic = [{"id": i, "claim": c} for i, c in self.semantic_hits[:3]]
+        self.last_self = [{"id": i, "kind": k, "text": t}
+                          for i, k, t in self.self_hits[:3]]
         return out
+
+    def recall_all(self, cue, limit=5):
+        """一次拿全三层: 经历 + 语义事实 + 自我知识。
+        这是"被问起时该想起什么"的完整答案。"""
+        hits = self.recall(cue, limit=limit)
+        return {"events": [{"id": h.event_id, "summary": h.summary,
+                            "score": h.score, "core": h.core} for h in hits],
+                "semantic": getattr(self, "last_semantic", []),
+                "self": getattr(self, "last_self", [])}
 
     # -- 多路召回 -------------------------------------------------------
     def _gather(self, cue):
         votes = []
 
-        # 路 1: 文本/语义相似 —— 去停用后按字面重叠, 基线实现
+        # 路 1: 文本相似 —— 走倒排索引(O(命中) 而非 O(全表))。
+        # 命中的事件按"命中 token 占 query 的比例"过滤, 与旧的 overlap 语义一致。
+        self.semantic_hits = []
+        self.self_hits = []
         if cue.text:
             qtokens = _tokens(cue.text)
             if qtokens:
-                for row in self.store.conn.execute("SELECT id, summary FROM events"):
-                    ov = _overlap(qtokens, _tokens(row["summary"]))
-                    if ov >= 0.22:
-                        votes.append((row["id"], "text"))
+                for eid, hits in self.store.search_tokens(qtokens, min_hits=1):
+                    if hits / float(len(qtokens)) >= 0.22:
+                        votes.append((eid, "text"))
+                # 路 8: 语义层 —— 世界事实也该被想起(答案常在这里, 不在事件里)
+                for r in self.store.conn.execute(
+                        "SELECT id, claim FROM semantic WHERE confidence>=0.45"):
+                    if _overlap(qtokens, _tokens(r["claim"])) >= 0.28:
+                        self.semantic_hits.append((r["id"], r["claim"]))
+                # 路 9: 自我知识 —— 问"我平时怎么说/我怎么做事"时该被点亮
+                for r in self.store.conn.execute(
+                        "SELECT id, kind, text FROM self_knowledge"):
+                    if _overlap(qtokens, _tokens(r["text"])) >= 0.28:
+                        self.self_hits.append((r["id"], r["kind"], r["text"]))
 
         # 路 2~5: 通过节点走网络
         for kind, value, tag in (

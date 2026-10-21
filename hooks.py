@@ -111,6 +111,10 @@ def main(argv=None):
     d.add_argument("--limit", type=int, default=5)
     d.add_argument("--path")
 
+    wi = sub.add_parser("wiki", help="wiki 同步/体检/回写")
+    wi.add_argument("action", choices=["sync", "lint", "ingest", "index"],
+                    nargs="?", default="sync")
+
     v = sub.add_parser("viz", help="生成 HTML 可视化仪表盘")
     v.add_argument("--path", default=None)
 
@@ -192,6 +196,15 @@ def main(argv=None):
                                         "day": a.day, "delta": a.add or 0,
                                         "reason": a.reason})
         print("好感累计: %+.1f" % r["total"])
+        return 0
+    elif a.cmd == "wiki":
+        ok, r = svc.dispatch("wiki", {"action": a.action})
+        if a.action == "lint":
+            print(r["report"])
+        elif a.action == "index":
+            print(r["content"])
+        else:
+            print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
         return 0
     elif a.cmd == "viz":
         ok, r = svc.dispatch("viz", {"path": a.path})

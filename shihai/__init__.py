@@ -27,6 +27,9 @@ from .pgraph import PersonalityGraphEngine, PersonaGraph
 from .voice import VoiceEngine, VoiceCard
 from .freemode import FreeMode
 from .kb import SelfKB, Bootstrap, KINDS as SELF_KINDS
+from .diary import DiaryEngine
+from .wiki import Wiki
+from .viz import render as render_viz
 
 __all__ = [
     "Store", "connect",
@@ -40,5 +43,6 @@ __all__ = [
     "VoiceEngine", "VoiceCard",
     "FreeMode",
     "SelfKB", "Bootstrap", "SELF_KINDS",
+    "DiaryEngine", "Wiki", "render_viz",
 ]
-__version__ = "0.3.0"
+__version__ = "0.6.0"

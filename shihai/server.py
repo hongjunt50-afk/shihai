@@ -24,6 +24,7 @@ API(全部幂等, 无隐式状态):
 """
 
 import json
+import os
 import sys
 
 from .store import Store
@@ -34,6 +35,8 @@ from .persona import PersonaEngine
 from .typologies import TypologyEngine
 from .freemode import FreeMode
 from .kb import SelfKB
+from .diary import DiaryEngine
+from .wiki import Wiki
 from . import home as H
 
 
@@ -55,6 +58,8 @@ class ShihaiService:
         self.persona = PersonaEngine(self.store, name=name, typology_path=self.typo_path)
         self.typology = self.persona.typology_engine
         self.kb = SelfKB(self.store)
+        self.diary = DiaryEngine(self.store)
+        self.wiki = Wiki(self.store, root=os.path.join(H.SHIHAI_HOME, 'wiki'))
         self.freemode = FreeMode(self.store, self.ingestor, self.recall,
                                  self.lifecycle, typology_engine=self.typology)
 
@@ -119,6 +124,7 @@ class ShihaiService:
             "persona": card,
             "voice": voice,
             "selfkb": boot.block,
+            "diary": self.diary.bootstrap_block(n=2),
             "typology": {"dominant": profile.jung_dominant,
                          "ennea": "%dw%d" % (profile.ennea_type, profile.ennea_wing),
                          "health": profile.health, "drift": profile.drift_direction},
@@ -187,19 +193,76 @@ class ShihaiService:
         return {"id": a["id"], "plasticity": p}
 
     def h_bootstrap(self, a):
-        """冷启动自举: 新开对话不需要 query, 也不需要重教。"""
+        """冷启动自举: 新开对话不需要 query, 也不需要重教。
+        自我知识(我是谁) + 最近日记(我经历过什么) 两层。"""
         b = self.kb.bootstrap(min_plasticity=float(a.get("min", 0.12)))
-        return {"block": b.block, "counts": b.counts,
+        block = b.block
+        if block.startswith("(还没有"):
+            block = ""   # 没有自我知识时不要占位, 让日记层直接出场
+        diaries = self.diary.bootstrap_block(n=int(a.get("diary_days", 2)))
+        if diaries:
+            block = block + "\n\n" + diaries
+        return {"block": block, "counts": b.counts,
                 "weak": [{"kind": k, "text": t, "plasticity": p} for k, t, p in b.weak]}
 
     def h_selfmaint(self, a):
         return self.kb.maintain(decay=bool(a.get("decay", True)))
+
+    def h_diary(self, a):
+        action = a.get("action", "recent")
+        if action == "close":
+            r = self.diary.close_day(a.get("day"))
+            return r or {"status": "no-events"}
+        if action == "compose":
+            d = self.diary.compose(a.get("day"), style=a.get("style", "voice"))
+            return {"draft": None} if d is None else {
+                "day": d.day, "text": d.text, "felt": d.felt,
+                "details": d.details, "mood": d.mood, "warmth": d.warmth}
+        if action == "recall":
+            rows = self.diary.recall(a.get("query", ""), int(a.get("limit", 3)))
+            return {"days": [{"day": r["day"], "mood": r["mood"], "text": r["text"],
+                              "felt": r["felt"], "warmth": r["warmth"]} for r in rows]}
+        if action == "edit":
+            return {"edited": self.store.edit_diary(a.get("day"), text=a.get("text"),
+                                                    felt=a.get("felt"))}
+        if action == "export":
+            path = a.get("path")
+            text = self.diary.export_markdown(path)
+            return {"path": path, "chars": len(text)}
+        if action == "import":
+            return {"imported": self.diary.import_markdown(a["path"])}
+        if action == "warmth":
+            return {"total": self.store.warmth_total(),
+                    "note": "好感由人手工录入(agent 只读)"}
+        rows = self.diary.recent(int(a.get("limit", 5)))
+        return {"days": [{"day": r["day"], "mood": r["mood"], "text": r["text"],
+                          "felt": r["felt"]} for r in rows]}
+
+    def h_warmth(self, a):
+        """好感条: 只允许人写入 —— agent 不能给自己加分。"""
+        if a.get("action") == "add":
+            self.store.add_warmth(a.get("day"), float(a.get("delta", 0)),
+                                  a.get("reason", ""))
+        return {"total": self.store.warmth_total()}
+
+    def h_wiki(self, a):
+        action = a.get("action", "sync")
+        if action == "sync":
+            return self.wiki.sync()
+        if action == "lint":
+            return {"report": self.wiki.lint_report()}
+        if action == "index":
+            path = os.path.join(self.wiki.root, "wiki", "index.md")
+            return {"path": path,
+                    "content": open(path, encoding="utf-8").read() if os.path.exists(path) else ""}
+        return {"root": self.wiki.root}
 
     HANDLERS = {
         "tell": h_tell, "ask": h_ask, "tick": h_tick, "context": h_context,
         "persona": h_persona, "freemode": h_freemode, "stats": h_stats,
         "selflearn": h_selflearn, "selfkb": h_selfkb, "selfconfirm": h_selfconfirm,
         "bootstrap": h_bootstrap, "selfmaint": h_selfmaint,
+        "diary": h_diary, "warmth": h_warmth, "wiki": h_wiki,
     }
 
     def dispatch(self, method, args=None):

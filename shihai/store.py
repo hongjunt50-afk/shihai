@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS persona_snapshot (
     created    TEXT NOT NULL
 );
 
+-- 检索索引: 事件的二字组倒排(2026-10-19 优化1)。
+-- 不用 FTS5 是因为中文没有词边界, unicode61 只能切整段;
+-- 二字组倒排更准, 且纯 SQL 就能做 O(命中) 而不是 O(n) 全表。
+CREATE TABLE IF NOT EXISTS event_tokens (
+    token   TEXT NOT NULL,
+    event_id INTEGER NOT NULL,
+    PRIMARY KEY(token, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tok_event ON event_tokens(event_id);
+
 -- 日记: 一天一篇第一人称叙述。这是"知道"变"经历过"的关键层。
 -- events 存事实(去了公园), diary 存当时的感受与细节(长椅上的三花猫、笑到停不下来)。
 -- 冷启动时读日记 = 以第一人称重新经历一次, 而不是被告知发生了什么。
@@ -189,6 +199,19 @@ CREATE TABLE IF NOT EXISTS self_knowledge (
 CREATE INDEX IF NOT EXISTS idx_self_kind ON self_knowledge(kind);
 CREATE INDEX IF NOT EXISTS idx_self_plasticity ON self_knowledge(plasticity);
 """
+
+
+_STOP_TOK = set("的了是我你他她它在和与就都也还又很太把被让给对说要做个这那有没不吗呢吧啊哦嗯")
+
+
+def _bigrams(text):
+    """中文二字组(去停用字)。与 recall._tokens 保持完全一致的规则 ——
+    索引和查询必须用同一套切分, 否则命中率会崩。"""
+    s = "".join(ch for ch in (text or "") if ch.isalnum() or "一" <= ch <= "鿿")
+    s = "".join(ch for ch in s if ch not in _STOP_TOK)
+    if len(s) < 2:
+        return set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
 def utcnow():
@@ -523,6 +546,40 @@ class Store:
         q += " ORDER BY plasticity DESC, uses DESC LIMIT ?"
         args.append(limit)
         return self.conn.execute(q, args).fetchall()
+
+    # -- 检索索引 -------------------------------------------------------
+    def index_tokens(self, event_id, summary):
+        """给一条事件建倒排(幂等: 先删后插)。"""
+        toks = _bigrams(summary)
+        if not toks:
+            return 0
+        self.conn.execute("DELETE FROM event_tokens WHERE event_id=?", (event_id,))
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO event_tokens(token, event_id) VALUES (?,?)",
+            [(t, event_id) for t in toks])
+        return len(toks)
+
+    def search_tokens(self, tokens, min_hits=1, limit=200):
+        """倒排查询: 只碰命中 token 的事件, 复杂度 O(命中数) 而非 O(全表)。
+        返回 [(event_id, 命中token数)] 按命中降序。"""
+        toks = list(set(tokens))
+        if not toks:
+            return []
+        ph = ",".join("?" * len(toks))
+        rows = self.conn.execute(
+            "SELECT event_id, COUNT(*) c FROM event_tokens WHERE token IN (%s) "
+            "GROUP BY event_id HAVING c>=? ORDER BY c DESC LIMIT ?" % ph,
+            toks + [min_hits, limit]).fetchall()
+        return [(r["event_id"], r["c"]) for r in rows]
+
+    def reindex_all(self):
+        """全量重建倒排(迁移/修复用)。"""
+        self.conn.execute("DELETE FROM event_tokens")
+        n = 0
+        for r in self.conn.execute("SELECT id, summary FROM events"):
+            n += self.index_tokens(r["id"], r["summary"] or "")
+        self.conn.commit()
+        return n
 
     # -- 日记 -----------------------------------------------------------
     def add_diary(self, day, text, felt=None, details=None, mood=None,

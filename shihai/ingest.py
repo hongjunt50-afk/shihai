@@ -92,6 +92,9 @@ class Ingestor:
         sem = self._attach_semantic(event_id, obs.text, nodes, edges)
         self._attach_person_promise(event_id, obs.text, nodes, edges)
 
+        # 5b. 倒排索引: 让以后的召回走 O(命中) 而不是 O(全表)
+        self.store.index_tokens(event_id, obs.text.strip())
+
         # 6. 反思预算(generative_agents): 有分量的经历积累到阈值 -> 该反思了
         if self.lifecycle is not None:
             self.lifecycle.charge_importance(ap.importance)

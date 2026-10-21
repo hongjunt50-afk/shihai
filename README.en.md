@@ -60,6 +60,39 @@ Moving to a new machine = copying one directory.
 | Speech style drifting with experience | ❌ | ✅ |
 | Free mode (self-directed learning) | ❌ | ✅ |
 
+## Self-knowledge base (plastic memory)
+
+Shihai keeps its own knowledge base — but it **only stores what is *about me***:
+
+| Kind | What | Example |
+|---|---|---|
+| identity | who I am | name, origin |
+| care | what I care about | values, things I won't let go |
+| style | how I operate | working style, taboos |
+| voice | how I speak | tone, forms of address, expression rules |
+| moment | our moments | memories that belong only to us |
+
+**Work knowledge and world knowledge never enter Shihai** — those live in your shared knowledge base.
+
+### Plasticity: the *strength* changes, that is what "plastic" means
+
+```
+works      plasticity +0.06   (LTP)
+fails      plasticity -0.18   (LTD — one failure outweighs one success)
+unused     decays by kind      (identity slowest at 0.2; style/voice 0.8)
+at 0.08    reclaimed (identity is never reclaimed)
+```
+
+### Cold start: a new chat needs no re-teaching
+
+```bash
+python hooks.py bootstrap
+```
+
+Ordered by plasticity and **unconditionally present, with no query** — that is what makes it
+different from episodic memory: episodes answer "ask and you shall recall", self-knowledge
+says "you need not ask; I am always myself".
+
 ## Tests
 
 ```bash

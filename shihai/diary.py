@@ -54,10 +54,58 @@ class DiaryDraft:
 
 
 class DiaryEngine:
-    def __init__(self, store):
+    def __init__(self, store, llm=None):
+        """llm: 可选的可调用对象 llm(prompt) -> str。
+        不传时 compose() 走规则基线(离线可用); 传入时日记会被真实富化 ——
+        带感官细节、带一句真实感受, 这才是"经历过"而不是"被告知"。
+
+        接口刻意极简(字符串进字符串出), 所以接什么都行:
+            OpenAI/DeepSeek: lambda p: client.chat(...).choices[0].message.content
+            本地 Ollama:     lambda p: requests.post("http://localhost:11434/api/generate", ...)["response"]
+            CLI:             lambda p: subprocess.run(["your-cli","-p",p], capture_output=True).stdout
+        """
         self.store = store
+        self.llm = llm
 
     # -- 生成: 一天的事件 → 一篇日记 --------------------------------------
+    def compose_with_llm(self, day=None):
+        """用外部模型把当天事实写成真日记。无 llm 时返回 None(调用方回退)。"""
+        if self.llm is None:
+            return None
+        prompt = self.to_prompt(day)
+        try:
+            text = self.llm(prompt)
+        except Exception:
+            return None
+        if not text or len(str(text).strip()) < 10:
+            return None
+        text = str(text).strip()
+        # 从生成结果里抽第一句当感受锚点(模型没按格式给 felt 时的兜底)
+        first = text.splitlines()[0][:60]
+        return DiaryDraft(day=day or today(), text=text, felt=first,
+                          details="", mood=self._mood_of(day),
+                          warmth=self._warmth_of(day),
+                          event_ids=self._event_ids(day))
+
+    def _mood_of(self, day):
+        r = self.store.conn.execute(
+            "SELECT SUM(valence) s FROM events WHERE ts LIKE ? AND dormant=0",
+            ((day or today()) + "%",)).fetchone()
+        v = float(r["s"] or 0)
+        return "暖" if v > 0.2 else ("低落" if v < -0.2 else "平静")
+
+    def _warmth_of(self, day):
+        rows = self.store.conn.execute(
+            "SELECT valence, arousal FROM events WHERE ts LIKE ? AND dormant=0",
+            ((day or today()) + "%",)).fetchall()
+        return round(sum(0.5 * float(r["valence"]) * float(r["arousal"])
+                         for r in rows if float(r["valence"]) > 0.1), 2)
+
+    def _event_ids(self, day):
+        return [r["id"] for r in self.store.conn.execute(
+            "SELECT id FROM events WHERE ts LIKE ? AND dormant=0",
+            ((day or today()) + "%",))]
+
     def compose(self, day=None, *, style="voice", felt_template=True):
         """把某天的事件织成第一人称日记。
 
@@ -126,8 +174,9 @@ class DiaryEngine:
         return kid, status
 
     def close_day(self, day=None):
-        """一天结束时调用(Stop hook / 定时任务)。"""
-        draft = self.compose(day)
+        """一天结束时调用(Stop hook / 定时任务)。
+        有 llm 就用它富化, 没有就回退规则基线。"""
+        draft = self.compose_with_llm(day) or self.compose(day)
         if draft is None:
             return None
         kid, status = self.write(draft)

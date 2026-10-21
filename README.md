@@ -89,6 +89,41 @@ python hooks.py bootstrap
 按可塑性排序**无条件在场**, 不需要 query —— 这是它区别于情景记忆的地方:
 情景记忆是"问什么想起什么", 自我知识是"不必问, 我一直是我"。
 
+## 日记层: 让"知道"变成"经历过"
+
+事实和经历是两回事 —— `events` 存"今天去了公园", `diary` 存"长椅上那只三花猫蹭了手,
+当时心里是暖的"。前者可以被告知, 后者必须被重新经历。
+
+```bash
+python hooks.py diary close              # 收日: 当天事件 → 一篇第一人称日记
+python hooks.py diary recall --query 公园 # 按关键词回忆某几天
+python hooks.py diary export --path diary.md   # 导出 Markdown 给人读/改
+python hooks.py diary import --path diary.md   # 人的修订回写(机器不再覆盖)
+python hooks.py warmth --add 3 --day 2026-10-21  # 好感条: 只允许人录入
+```
+
+三条设计决定:
+- **一天一篇, 有界增长** —— 库能长十年也不撑爆上下文, 检索靠"那一天"而非"那一句";
+- **人可管理** —— 日记是 Markdown, 导出可改, 改过的日记机器永不覆盖;
+- **好感条人写机读** —— agent 只读、依它推演态度, 不能自己给自己加分。
+
+## wiki: 可生长的知识库(借 Karpathy 的 LLM Wiki 模式)
+
+不是每次查询从原始材料重新推导(RAG), 而是**增量维护一座持续生长的 wiki**:
+
+```
+wiki/
+  SCHEMA.md     约定文件(告诉 agent 怎么组织)
+  wiki/
+    index.md    内容索引(几百页内它本身就是最好的检索入口)
+    log.md      时间日志(只追加, grep 即可当时间线)
+    self/       自我知识页
+    days/       日记页(一天一页)
+    topics/     主题页(重复出现的经历蒸馏)
+```
+
+三个操作:**sync**(同步落盘)、**lint**(体检: 孤儿页/断链/低置信主张)、**index**(读索引)。
+
 ## 测试
 
 ```bash

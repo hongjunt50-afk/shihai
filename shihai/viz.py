@@ -26,6 +26,12 @@ from datetime import datetime, timedelta, timezone
 from .store import utcnow
 
 
+def HOME():
+    import os as _os
+    return _os.environ.get("SHIHAI_HOME",
+                           _os.path.join(_os.path.expanduser("~"), ".shihai"))
+
+
 def _age_days(ts):
     try:
         t = datetime.fromisoformat(ts)
@@ -110,9 +116,46 @@ def collect(store, persona_engine=None, typology_engine=None, kb=None, diary=Non
                        "plasticity": round(float(r["plasticity"]), 2),
                        "uses": r["uses"], "wins": r["wins"], "losses": r["losses"]})
 
+    # 关系账本(此前从未有出口)
+    relations = []
+    for r in c.execute(
+            "SELECT n.label, rl.trust, rl.intimacy, rl.boundary_hit, "
+            "rl.promise_up, rl.promise_broken, rl.note, rl.updated "
+            "FROM relation rl JOIN nodes n ON n.id = rl.node_id "
+            "ORDER BY rl.trust DESC"):
+        relations.append({"name": r["label"],
+                          "trust": round(float(r["trust"]), 2),
+                          "intimacy": round(float(r["intimacy"]), 2),
+                          "boundary_hit": r["boundary_hit"],
+                          "promise_up": r["promise_up"],
+                          "promise_broken": r["promise_broken"],
+                          "note": r["note"] or "", "updated": r["updated"] or ""})
+
+    # 时间轴: 每次快照当时的支点规模与 trait(用于拖动看演化)
+    timeline = []
+    for r in c.execute("SELECT ts, traits, core_ids FROM persona_snapshot ORDER BY id"):
+        try:
+            t = json.loads(r["traits"])
+            cores = json.loads(r["core_ids"] or "[]")
+        except Exception:
+            continue
+        timeline.append({"ts": r["ts"][:10] if r["ts"] else "",
+                         "traits": t, "cores": len(cores)})
+
+    # wiki 体检(把 lint 接进可视化)
+    lint = {"orphans": [], "broken_links": [], "stale": [], "missing": []}
+    try:
+        from .wiki import Wiki
+        lint = Wiki(store, root=os.path.join(HOME(), "wiki")).lint()
+    except Exception:
+        pass
+
     return {"overview": overview, "typology": typology, "traits": traits,
             "card": card, "graph": graph, "history": history, "memories": mem,
-            "days": days, "selfkb": selfkb, "generated": utcnow()}
+            "days": days, "selfkb": selfkb, "relations": relations,
+            "timeline": timeline,
+            "lint": {k: v[:8] for k, v in lint.items()},
+            "generated": utcnow()}
 
 
 HTML = r"""<!DOCTYPE html>
@@ -148,6 +191,15 @@ ul.self li:last-child{border:0}
 .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
 .tag{font-size:10.5px;color:var(--dim);border:1px solid var(--line);padding:0 5px;border-radius:4px}
 pre.card-text{white-space:pre-wrap;font:12.5px/1.65 ui-monospace,Consolas,monospace;color:var(--txt);margin:0;max-height:300px;overflow:auto}
+.timeline-ctl{display:flex;gap:12px;align-items:center;margin:0 0 12px;color:var(--dim);font-size:12px}
+.timeline-ctl input[type=range]{flex:1;accent-color:var(--acc)}
+.tl-label{font-variant-numeric:tabular-nums;min-width:150px}
+.rel{display:grid;gap:8px}
+.rel-row{display:grid;grid-template-columns:88px 1fr 1fr;gap:10px;align-items:center;font-size:12px}
+.rel-bar{height:7px;border-radius:4px;background:#222a36;overflow:hidden}
+.rel-bar i{display:block;height:100%}
+.lint-item{color:var(--dim);font-size:12px}
+.lint-item b{color:var(--bad)}
 .heat{display:flex;gap:3px}
 .heat .d{width:12px;height:12px;border-radius:2px;background:#1d242f}
 footer{color:var(--dim);font-size:11px;padding:0 28px 28px}
@@ -159,6 +211,10 @@ footer{color:var(--dim);font-size:11px;padding:0 28px 28px}
 <main>
   <section class="card wide"><h2>性格图谱</h2>
     <p class="hint">核心记忆是支点, 撑起性格倾向; 同向互相加固, 反向形成张力。</p>
+    <div class="timeline-ctl" id="tlctl" style="display:none">
+      <input type="range" id="tl" min="0" max="0" value="0">
+      <span class="tl-label" id="tllabel"></span>
+    </div>
     <svg id="graph" viewBox="0 0 900 460"></svg>
     <div class="legend" id="glegend"></div>
   </section>
@@ -177,6 +233,10 @@ footer{color:var(--dim);font-size:11px;padding:0 28px 28px}
     <div class="legend" id="hlegend"></div></section>
   <section class="card"><h2>自我知识可塑性</h2><p class="hint">条越长越稳固; 用了会变硬, 错多了会淡出。</p>
     <ul class="self" id="selfkb"></ul></section>
+  <section class="card"><h2>关系账本</h2><p class="hint">信任与亲密度; 每段关系是一本账。</p>
+    <div class="rel" id="rel"></div></section>
+  <section class="card"><h2>wiki 体检</h2><p class="hint">孤儿页/断链/低置信主张 —— 知识库的健康度。</p>
+    <div id="lint"></div></section>
   <section class="card wide"><h2>人格卡</h2><pre class="card-text" id="card"></pre></section>
 </main>
 <footer>生成于 __GEN__ · 识海 shihai</footer>
@@ -195,9 +255,22 @@ const $=s=>document.querySelector(s);
   $("#kpis").innerHTML=k.map(([a,b])=>`<div class="kpi"><b>${b}</b><span>${a}</span></div>`).join("");
 })();
 
-/* ---- 性格图谱: 中心 → trait → 事件 ---- */
+/* ---- 时间轴: 拖动看性格演化 ---- */
+let TLIDX=-1;
 (function(){
+  const hist=D.timeline||[];
+  if(hist.length<2)return;
+  const ctl=$("#tlctl"), sl=$("#tl"), lab=$("#tllabel");
+  ctl.style.display="flex"; sl.max=hist.length-1; sl.value=hist.length-1;
+  const upd=()=>{TLIDX=+sl.value; lab.textContent=
+    `${hist[TLIDX].ts} · 核心 ${hist[TLIDX].cores} 条`; drawGraph();};
+  sl.addEventListener("input",upd); upd();
+})();
+
+/* ---- 性格图谱: 中心 → trait → 事件 ---- */
+function drawGraph(){
   const svg=$("#graph"), W=900,H=460, cx=W/2, cy=H/2;
+  while(svg.firstChild) svg.removeChild(svg.firstChild);   // 时间轴重绘前清空
   const g=D.graph, fulcrums=g.fulcrums||[], braids=g.braids||[];
   if(!fulcrums.length){svg.appendChild(el("text",{x:cx,y:cy,"text-anchor":"middle",fill:"#7b8798",
     "font-size":"13"})).textContent="还没有核心记忆, 性格图谱还是白纸。";return;}
@@ -251,7 +324,8 @@ const $=s=>document.querySelector(s);
     <span><i style="background:#f7768e"></i>张力 ${braids.filter(b=>b.kind==="tension").length}</span>
     <span><i style="background:#bb9af7"></i>正向支点</span><span><i style="background:#f7768e"></i>反向支点</span>
     <span>${g.summary||""}</span>`;
-})();
+}
+drawGraph();
 
 /* ---- 雷达 ---- */
 (function(){
@@ -369,6 +443,65 @@ const $=s=>document.querySelector(s);
     <span style="flex:1">${r.text}</span>
     <span class="bar"><i style="width:${Math.round(r.plasticity*100)}%"></i></span>
     <span style="color:#7b8798;font-size:11px">${r.plasticity.toFixed(2)}</span></li>`).join("");
+})();
+
+/* ---- 关系账本 ---- */
+(function(){
+  const box=$("#rel"), rows=D.relations||[];
+  if(!rows.length){box.innerHTML='<span class="hint">还没有记录过关系。</span>';return;}
+  box.innerHTML=rows.slice(0,8).map(r=>`
+    <div class="rel-row">
+      <span>${r.name}</span>
+      <span class="rel-bar" title="信任 ${r.trust}"><i style="width:${r.trust*100}%;background:#9ece6a"></i></span>
+      <span class="rel-bar" title="亲密度 ${r.intimacy}"><i style="width:${r.intimacy*100}%;background:#7aa2f7"></i></span>
+    </div>`).join("") +
+    `<div class="hint" style="margin-top:6px">左=信任 右=亲密度
+      ${rows.some(r=>r.boundary_hit)?`· 有 ${rows.filter(r=>r.boundary_hit).length} 段关系碰到过边界`:""}</div>`;
+})();
+
+/* ---- wiki 体检 ---- */
+(function(){
+  const box=$("#lint"), L=D.lint||{};
+  const parts=[];
+  const map={orphans:"孤儿页",broken_links:"断链",stale:"低置信主张",missing:"缺页"};
+  for(const k in map){
+    const arr=L[k]||[];
+    if(!arr.length)continue;
+    parts.push(`<div class="lint-item"><b>${map[k]} (${arr.length})</b><br>${
+      arr.slice(0,4).map(x=>"· "+x).join("<br>")}</div>`);
+  }
+  box.innerHTML=parts.length?parts.join('<div style="height:8px"></div>')
+    :'<span class="hint" style="color:#9ece6a">没有发现问题。</span>';
+})();
+
+/* ---- 衰减趋势线(SVG 上叠一条指数拟合曲线) ---- */
+(function(){
+  const svg=$("#decay"), mem=D.memories||[];
+  if(mem.length<3)return;
+  const W=900,H=300,L=40,B=34,T=12,Rr=14;
+  const maxAge=Math.max(1,...mem.map(m=>m.age));
+  // 最小二乘拟合 strength = a*exp(-b*age) → ln(s)=ln(a)-b*age
+  const pts=mem.filter(m=>m.strength>0.02)
+               .map(m=>[m.age,Math.log(m.strength)]);
+  if(pts.length<3)return;
+  const n=pts.length, sx=pts.reduce((a,p)=>a+p[0],0), sy=pts.reduce((a,p)=>a+p[1],0);
+  const sxx=pts.reduce((a,p)=>a+p[0]*p[0],0), sxy=pts.reduce((a,p)=>a+p[0]*p[1],0);
+  const den=n*sxx-sx*sx;
+  if(!den)return;
+  const b=-(n*sxy-sx*sy)/den, lnA=(sy+b*sx)/n;
+  const poly=[];
+  for(let i=0;i<=40;i++){
+    const age=maxAge*i/40, s=Math.exp(lnA-b*age);
+    if(s>1.2||s<0)continue;
+    const x=L+(W-L-Rr)*(age/maxAge), y=T+(H-T-B)*(1-s);
+    poly.push(`${x},${y}`);
+  }
+  const line=el("polyline",{points:poly.join(" "),fill:"none",stroke:"#e0af68",
+    "stroke-width":1.4,"stroke-dasharray":"5 4","stroke-opacity":.85});
+  svg.insertBefore(line, svg.firstChild);
+  const tx=el("text",{x:W-Rr,y:T+10,"text-anchor":"end","font-size":"10",fill:"#e0af68"});
+  tx.textContent=`遗忘曲线拟合: 半衰期 ${(0.693/b).toFixed(1)} 天`;
+  svg.appendChild(tx);
 })();
 
 $("#card").textContent = D.card || "(人格卡尚未生成)";

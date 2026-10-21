@@ -93,6 +93,26 @@ Ordered by plasticity and **unconditionally present, with no query** — that is
 different from episodic memory: episodes answer "ask and you shall recall", self-knowledge
 says "you need not ask; I am always myself".
 
+## Diary layer: turning "knowing" into "having lived"
+
+Facts and lived experience are two different things — `events` stores "went to the park today";
+`diary` stores "the calico cat by the bench rubbed against my hand, and something felt warm".
+The former can be told; the latter must be *re-lived*.
+
+```bash
+python hooks.py diary close                      # close the day → a first-person entry
+python hooks.py diary recall --query park        # recall those days by keyword
+python hooks.py diary export --path diary.md     # export Markdown for humans to read/edit
+python hooks.py diary import --path diary.md     # write human edits back (machine won't overwrite)
+python hooks.py warmth --add 3 --day 2026-10-21  # warmth ledger: human-only writes
+```
+
+## wiki: a knowledge base that grows (Karpathy's LLM Wiki pattern)
+
+Not re-deriving knowledge from raw sources on every query (RAG), but **incrementally maintaining
+a living wiki**: `SCHEMA.md` conventions, `index.md` content catalog, `log.md` append-only timeline,
+plus `self/`, `days/`, `topics/` page trees. Operations: **sync**, **lint**, **index**.
+
 ## Tests
 
 ```bash

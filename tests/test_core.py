@@ -255,6 +255,60 @@ def test_voice_reads_self_knowledge():
         store.close()
 
 
+def test_diary_close_and_recall():
+    """一天的事件收拢成一篇第一人称日记, 带感受锚点。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.diary import DiaryEngine
+        ing.ingest(Observation("用户带我去公园看猫, 三花一直蹭我的手, 我很开心"))
+        d = DiaryEngine(store)
+        r = d.close_day()
+        assert r and r["events"] == 1
+        rows = d.recent(1)
+        assert rows and "公园" in rows[0]["text"]
+        assert rows[0]["felt"], "日记必须有感受锚点, 否则只是事实复述"
+        store.close()
+
+
+def test_diary_human_edit_protected():
+    """人改过的日记不被机器覆盖(人的记忆主权)。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.diary import DiaryEngine
+        ing.ingest(Observation("今天很平常"))
+        d = DiaryEngine(store)
+        r = d.close_day()
+        day = r["day"]
+        store.edit_diary(day, text="我亲手改写的这一天。")
+        d.close_day(day)   # 再跑一次收日
+        row = store.diary_of(day)
+        assert "亲手改写" in row["text"], "机器覆盖了人工修订"
+        store.close()
+
+
+def test_wiki_sync_and_lint():
+    """wiki: 自我知识+日记能落成 markdown, 索引与日志正确。"""
+    import os as _os
+    from shihai.wiki import Wiki
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.kb import SelfKB
+        from shihai.diary import DiaryEngine
+        SelfKB(store).learn("我叫小海", kind="identity")
+        ing.ingest(Observation("用户带我去公园看猫, 我很开心"))
+        DiaryEngine(store).close_day()
+        w = Wiki(store, root=_os.path.join(tmp, "wiki"))
+        stats = w.sync()
+        assert stats["self"] >= 1 and stats["days"] == 1
+        index = open(_os.path.join(tmp, "wiki", "wiki", "index.md"),
+                     encoding="utf-8").read()
+        assert "self/identity" in index and "days/" in index
+        log = open(_os.path.join(tmp, "wiki", "wiki", "log.md"),
+                   encoding="utf-8").read()
+        assert "sync" in log
+        store.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

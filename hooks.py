@@ -35,6 +35,10 @@ def _render_context_block(r):
     if r.get("voice"):
         lines.append("")
         lines.append(r["voice"])
+    if r.get("selfkb"):
+        lines.append("")
+        lines.append("## 关于我自己(可塑性记忆)")
+        lines.append(r["selfkb"])
     t = r["typology"]
     lines.append("")
     lines.append("类型档案: 荣格主导 %s | 九型 %s | 健康度 %.2f(%s)"

@@ -33,6 +33,7 @@ from .lifecycle import Lifecycle
 from .persona import PersonaEngine
 from .typologies import TypologyEngine
 from .freemode import FreeMode
+from .kb import SelfKB
 from . import home as H
 
 
@@ -53,6 +54,7 @@ class ShihaiService:
             name = ident.get("name", name)
         self.persona = PersonaEngine(self.store, name=name, typology_path=self.typo_path)
         self.typology = self.persona.typology_engine
+        self.kb = SelfKB(self.store)
         self.freemode = FreeMode(self.store, self.ingestor, self.recall,
                                  self.lifecycle, typology_engine=self.typology)
 
@@ -161,9 +163,39 @@ class ShihaiService:
         }
 
     # -- dispatch --------------------------------------------------------
+    def h_selflearn(self, a):
+        """学一条关于自己的事。工作类内容会被拒收并提示走共享知识库。"""
+        kid, status, note = self.kb.learn(
+            a.get("text", ""), kind=a.get("kind"), trigger=a.get("trigger"),
+            source=a.get("source", "user"))
+        return {"id": kid, "status": status, "note": note}
+
+    def h_selfkb(self, a):
+        rows = self.store.self_knowledge(kind=a.get("kind"),
+                                         min_plasticity=float(a.get("min", 0.0)))
+        return {"items": [{"id": r["id"], "kind": r["kind"], "text": r["text"],
+                           "plasticity": round(r["plasticity"], 3),
+                           "uses": r["uses"], "wins": r["wins"], "losses": r["losses"]}
+                          for r in rows]}
+
+    def h_selfconfirm(self, a):
+        p = self.kb.confirm(int(a["id"]), success=bool(a.get("success", True)))
+        return {"id": a["id"], "plasticity": p}
+
+    def h_bootstrap(self, a):
+        """冷启动自举: 新开对话不需要 query, 也不需要重教。"""
+        b = self.kb.bootstrap(min_plasticity=float(a.get("min", 0.12)))
+        return {"block": b.block, "counts": b.counts,
+                "weak": [{"kind": k, "text": t, "plasticity": p} for k, t, p in b.weak]}
+
+    def h_selfmaint(self, a):
+        return self.kb.maintain(decay=bool(a.get("decay", True)))
+
     HANDLERS = {
         "tell": h_tell, "ask": h_ask, "tick": h_tick, "context": h_context,
         "persona": h_persona, "freemode": h_freemode, "stats": h_stats,
+        "selflearn": h_selflearn, "selfkb": h_selfkb, "selfconfirm": h_selfconfirm,
+        "bootstrap": h_bootstrap, "selfmaint": h_selfmaint,
     }
 
     def dispatch(self, method, args=None):

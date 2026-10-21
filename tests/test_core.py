@@ -229,6 +229,32 @@ def test_self_kb_identity_never_forgotten():
         store.close()
 
 
+def test_context_projects_selfkb():
+    """context 投影必须包含自我知识块(否则新对话仍要重教)。"""
+    import os as _os
+    from shihai.server import ShihaiService
+    with tempfile.TemporaryDirectory() as tmp:
+        _os.environ["SHIHAI_HOME"] = tmp
+        svc = ShihaiService(agent_name="投影测试")
+        svc.dispatch("selflearn", {"text": "我叫小海", "kind": "identity"})
+        ok, r = svc.dispatch("context", {})
+        assert "selfkb" in r, "context 缺 selfkb 字段"
+        assert "小海" in r["selfkb"], "自我知识未进入投影"
+        svc.store.close()
+
+
+def test_voice_reads_self_knowledge():
+    """voice 必须能读到 self_knowledge 的 voice 类(不只是 semantic)。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        from shihai.kb import SelfKB
+        SelfKB(store).learn("我说话不要客套话, 直接说重点", kind="voice")
+        life.tick(persona=pers)
+        voice = pers.refresh().voice
+        assert "客套" in voice, "self_knowledge 的 voice 类未进入风格卡"
+        store.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

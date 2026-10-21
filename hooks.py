@@ -111,6 +111,9 @@ def main(argv=None):
     d.add_argument("--limit", type=int, default=5)
     d.add_argument("--path")
 
+    v = sub.add_parser("viz", help="生成 HTML 可视化仪表盘")
+    v.add_argument("--path", default=None)
+
     w = sub.add_parser("warmth", help="好感条(只允许人录入)")
     w.add_argument("--add", type=float)
     w.add_argument("--day")
@@ -189,6 +192,10 @@ def main(argv=None):
                                         "day": a.day, "delta": a.add or 0,
                                         "reason": a.reason})
         print("好感累计: %+.1f" % r["total"])
+        return 0
+    elif a.cmd == "viz":
+        ok, r = svc.dispatch("viz", {"path": a.path})
+        print("已生成: %s (%d KB)" % (r["path"], r["bytes"] // 1024))
         return 0
     elif a.cmd == "freemode":
         action = {"on": "on", "off": "off", "status": "status", "run": "run"}[a.action]

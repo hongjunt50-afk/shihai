@@ -140,6 +140,26 @@ CREATE TABLE IF NOT EXISTS persona_snapshot (
     core_ids   TEXT NOT NULL,
     created    TEXT NOT NULL
 );
+
+-- 自我知识库: 只存"关于我自己"的东西, 不存工作知识(那些去共享知识库)。
+-- plasticity 就是可塑性记忆的核心: 稳固度随使用而变, 不是内容随使用而变。
+CREATE TABLE IF NOT EXISTS self_knowledge (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT NOT NULL,     -- identity/care/style/voice/moment
+    text       TEXT NOT NULL,
+    trigger    TEXT,              -- 何时该想起这条(关键词/情境)
+    plasticity REAL DEFAULT 0.5,  -- 0.05 ~ 1.0 稳固度(LTP 涨 / LTD 落)
+    uses       INTEGER DEFAULT 0,
+    wins       INTEGER DEFAULT 0,
+    losses     INTEGER DEFAULT 0,
+    source     TEXT DEFAULT 'user',  -- user/self/reflection
+    last_used  TEXT,
+    created    TEXT NOT NULL,
+    updated    TEXT NOT NULL,
+    UNIQUE(kind, text)
+);
+CREATE INDEX IF NOT EXISTS idx_self_kind ON self_knowledge(kind);
+CREATE INDEX IF NOT EXISTS idx_self_plasticity ON self_knowledge(plasticity);
 """
 
 
@@ -412,6 +432,69 @@ class Store:
             (utcnow(), query, json.dumps(cues, ensure_ascii=False), json.dumps(hits, ensure_ascii=False)),
         )
         self.conn.commit()
+
+    # -- 自我知识库(可塑性记忆) ------------------------------------------
+    def learn_self(self, kind, text, trigger=None, source="user", init=0.55):
+        """学会一条关于自己的事(LTP 的写入端)。
+        同 (kind, text) 重复学会 → 不是重复存储, 而是可塑性上涨(被验证了)。"""
+        now = utcnow()
+        row = self.conn.execute(
+            "SELECT * FROM self_knowledge WHERE kind=? AND text=?", (kind, text)).fetchone()
+        if row:
+            p = min(1.0, float(row["plasticity"]) + 0.12)
+            self.conn.execute(
+                "UPDATE self_knowledge SET plasticity=?, wins=wins+1, updated=?, "
+                "trigger=COALESCE(?, trigger) WHERE id=?",
+                (p, now, trigger, row["id"]))
+            self.conn.commit()
+            return row["id"], p
+        cur = self.conn.execute(
+            """INSERT INTO self_knowledge(kind, text, trigger, plasticity, source, created, updated)
+               VALUES (?,?,?,?,?,?,?)""",
+            (kind, text, trigger, init, source, now, now))
+        self.conn.commit()
+        return cur.lastrowid, init
+
+    def use_self(self, kid, success=True):
+        """这条知识被用了一次: 奏效 → 加强; 失败 → 削弱(LTD)。"""
+        row = self.conn.execute("SELECT * FROM self_knowledge WHERE id=?", (kid,)).fetchone()
+        if row is None:
+            return None
+        delta = 0.06 if success else -0.18   # 负面证据权重更大: 错一次比成一次记得牢
+        p = max(0.05, min(1.0, float(row["plasticity"]) + delta))
+        self.conn.execute(
+            "UPDATE self_knowledge SET plasticity=?, uses=uses+1, "
+            "wins=wins+?, losses=losses+?, last_used=?, updated=? WHERE id=?",
+            (p, 1 if success else 0, 0 if success else 1, utcnow(), utcnow(), kid))
+        self.conn.commit()
+        return p
+
+    def decay_self(self, rate=0.03, floor=0.05):
+        """长期不用的自我知识会变薄(结构可塑性: 不用则剪)。
+        注意: identity 类衰减最慢 —— 身份不该因为三个月没提就消失。"""
+        now = utcnow()
+        rows = self.conn.execute("SELECT * FROM self_knowledge").fetchall()
+        changed = 0
+        for r in rows:
+            k = {"identity": 0.2, "care": 0.6, "style": 0.8, "voice": 0.8}.get(r["kind"], 1.0)
+            p = max(floor, float(r["plasticity"]) - rate * k)
+            if abs(p - float(r["plasticity"])) > 1e-6:
+                self.conn.execute(
+                    "UPDATE self_knowledge SET plasticity=?, updated=? WHERE id=?",
+                    (p, now, r["id"]))
+                changed += 1
+        self.conn.commit()
+        return changed
+
+    def self_knowledge(self, kind=None, min_plasticity=0.0, limit=100):
+        q = "SELECT * FROM self_knowledge WHERE plasticity>=?"
+        args = [min_plasticity]
+        if kind:
+            q += " AND kind=?"
+            args.append(kind)
+        q += " ORDER BY plasticity DESC, uses DESC LIMIT ?"
+        args.append(limit)
+        return self.conn.execute(q, args).fetchall()
 
     # -- 人格快照 -------------------------------------------------------
     def add_persona(self, traits, card, core_ids):

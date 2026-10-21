@@ -23,6 +23,10 @@ from .recall import RecallEngine, Cue, Spotlight
 from .lifecycle import Lifecycle, LifecycleReport
 from .persona import PersonaEngine, PersonaCard
 from .typologies import TypologyEngine, TypologyProfile, JUNG_PATHWAYS, ENNEA
+from .pgraph import PersonalityGraphEngine, PersonaGraph
+from .voice import VoiceEngine, VoiceCard
+from .freemode import FreeMode
+from .kb import SelfKB, Bootstrap, KINDS as SELF_KINDS
 
 __all__ = [
     "Store", "connect",
@@ -32,5 +36,9 @@ __all__ = [
     "Lifecycle", "LifecycleReport",
     "PersonaEngine", "PersonaCard",
     "TypologyEngine", "TypologyProfile", "JUNG_PATHWAYS", "ENNEA",
+    "PersonalityGraphEngine", "PersonaGraph",
+    "VoiceEngine", "VoiceCard",
+    "FreeMode",
+    "SelfKB", "Bootstrap", "SELF_KINDS",
 ]
-__version__ = "0.1.0"
+__version__ = "0.3.0"

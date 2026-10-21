@@ -158,13 +158,20 @@ class VoiceEngine:
 
     # -- 素材提取 ---------------------------------------------------------
     def _user_teachings(self):
-        """用户明确说过的表达要求: "我喜欢/我要求/别说/不要"类语义事实。"""
+        """用户明确说过的表达要求。两个来源:
+        1) 自我知识库 voice 类(新通道, 可塑性排序, 更权威)
+        2) 语义层含表达关键词的事实(旧通道, 保留兼容)"""
         rules = []
+        for r in self.store.conn.execute(
+                "SELECT text FROM self_knowledge WHERE kind='voice' "
+                "ORDER BY plasticity DESC LIMIT 4").fetchall():
+            rules.append(r["text"])
         for r in self.store.conn.execute(
                 "SELECT claim FROM semantic WHERE confidence >= 0.55").fetchall():
             claim = r["claim"]
             if re.search(r"(说话|表达|口吻|语气|别叫|要叫|称呼|客套|废话|说人话)", claim):
-                rules.append(claim)
+                if claim not in rules:
+                    rules.append(claim)
         return rules[:4]
 
     def _jargon_from_semantic(self):

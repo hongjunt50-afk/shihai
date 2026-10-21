@@ -16,3 +16,5 @@ wiki/
 .wtest/
 .v3test*/
 .diag*/
+_viz_preview.html
+.viztest/

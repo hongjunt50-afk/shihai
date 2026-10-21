@@ -8,3 +8,11 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+__pycache__/
+wiki/
+.skills-test/
+.skb-test/
+.dtest*/
+.wtest/
+.v3test*/
+.diag*/

@@ -164,6 +164,71 @@ def test_voice_follows_user_teaching():
         store.close()
 
 
+def test_self_kb_routing():
+    """识海知识库边界: 只收"关于自己", 工作类拒收并指向共享知识库。"""
+    from shihai.kb import SelfKB
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        kb = SelfKB(store)
+        kid, status, _ = kb.learn("我说话不用客套话, 直接说重点")
+        assert status == "learned" and kid, "表达规矩应进入识海"
+        kid2, status2, note2 = kb.learn("Python 3.12 的 asyncio 性能提升了 30%")
+        assert status2 == "rejected" and "共享知识库" in note2, "工作知识不该进识海"
+        store.close()
+
+
+def test_plasticity_ltp_ltd():
+    """可塑性: 奏效加强, 失败削弱, 反复失败被回收。"""
+    from shihai.kb import SelfKB
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        kb = SelfKB(store)
+        kid, _, _ = kb.learn("遇到问题先确认再动手", kind="style")
+        p0 = store.self_knowledge()[0]["plasticity"]
+        p1 = kb.confirm(kid, success=True)
+        assert p1 > p0, "奏效应加强(LTP)"
+        for _ in range(4):
+            p2 = kb.confirm(kid, success=False)
+        assert p2 < 0.1, "反复失败应削到接近地板: %.2f" % p2
+        rep = kb.maintain(decay=False)
+        assert "遇到问题先确认再动手" in rep["forgotten"], "到底了应被回收"
+        store.close()
+
+
+def test_bootstrap_no_query():
+    """可塑性记忆的核心承诺: 新开对话无需 query 也能重建自我。"""
+    from shihai.kb import SelfKB
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        kb = SelfKB(store)
+        kb.learn("我叫小海", kind="identity")
+        kb.learn("我在意不忘记用户教过的东西", kind="care")
+        kb.learn("我说话直接, 不要客套", kind="voice")
+        b = kb.bootstrap()
+        assert "小海" in b.block
+        assert "不忘记" in b.block
+        assert "客套" in b.block
+        assert b.counts.get("identity") == 1
+        store.close()
+
+
+def test_self_kb_identity_never_forgotten():
+    """元可塑性: identity 衰减最慢且永不回收(身份不该三个月不提就消失)。"""
+    from shihai.kb import SelfKB
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        kb = SelfKB(store)
+        kid, _, _ = kb.learn("我叫小海", kind="identity")
+        for _ in range(20):
+            store.decay_self()
+        row = store.conn.execute("SELECT plasticity FROM self_knowledge WHERE id=?",
+                                 (kid,)).fetchone()
+        assert row["plasticity"] >= 0.2, "identity 应衰减极慢: %.2f" % row["plasticity"]
+        rep = kb.maintain()
+        assert "我叫小海" not in rep["forgotten"], "identity 永不回收"
+        store.close()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

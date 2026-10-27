@@ -12,6 +12,8 @@ r"""识海钩子脚本 —— 把识海接进 agent 日常循环的三个对接�
     python hooks.py tell   --file last_session.txt   # 会话摘 要入库
     python hooks.py tell   --text "一句话经历"
     python hooks.py tick   [--days 1] [--free 3]     # 定时任务调用
+    python hooks.py implant --archetype cautious     # 植入人格起点(之后仍会被记忆推动)
+    python hooks.py drift                            # 看它被推到了哪里
     python hooks.py freemode on|off|run [--cycles 3]
 
 每次调用独立进程, 调完即退 —— 不需要常驻服务也能跑通全链路;
@@ -123,6 +125,18 @@ def main(argv=None):
     w.add_argument("--day")
     w.add_argument("--reason", default="")
 
+    im = sub.add_parser("implant", help="植入人格卡(起点, 之后仍会被记忆推动)")
+    im.add_argument("--archetype")
+    im.add_argument("--traits", help='json, 如 {"caution":0.7}')
+    im.add_argument("--flux", help='json, 每维可塑半径')
+    im.add_argument("--identity", help="内核段: 逐字进卡, 记忆永不改写")
+    im.add_argument("--note", default=None)
+
+    ar = sub.add_parser("archetypes", help="列出可用的现成人格底稿")
+
+    dr = sub.add_parser("drift", help="人格漂移账本")
+    dr.add_argument("--limit", type=int, default=15)
+
     a = p.parse_args(argv)
 
     svc = ShihaiService()
@@ -209,6 +223,41 @@ def main(argv=None):
     elif a.cmd == "viz":
         ok, r = svc.dispatch("viz", {"path": a.path})
         print("已生成: %s (%d KB)" % (r["path"], r["bytes"] // 1024))
+        return 0
+    elif a.cmd == "implant":
+        ok, r = svc.dispatch("implant", {
+            "archetype": a.archetype,
+            "traits": json.loads(a.traits) if a.traits else None,
+            "flux": json.loads(a.flux) if a.flux else None,
+            "identity_text": a.identity, "note": a.note})
+        print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False, indent=1))
+        return 0 if ok else 1
+    elif a.cmd == "archetypes":
+        ok, r = svc.dispatch("archetypes", {})
+        for k, v in r["archetypes"].items():
+            tops = sorted(v["traits"].items(), key=lambda kv: -kv[1])[:2]
+            print("%-12s %-8s %s" % (k, v["name"],
+                                     ", ".join("%s %.2f" % t for t in tops)))
+        return 0
+    elif a.cmd == "drift":
+        from shihai.persona import TRAIT_LABEL
+        ok, r = svc.dispatch("drift", {"limit": a.limit})
+        if not r["fields"]:
+            print("(还没有植入过人格卡 —— 这张脸是纯粹从记忆里长出来的)")
+            return 0
+        print("人格卡 v%d 的漂移账本:" % r["version"])
+        for f in r["fields"]:
+            d = f["value"] - f["seed"]
+            print("  %-6s 起点 %.2f → 现在 %.2f  %+.2f  用掉 %3.0f%% 余地"
+                  % (TRAIT_LABEL.get(f["trait"], f["trait"]), f["seed"], f["value"],
+                     d, 100 * f["used"]))
+        if r["drift"]:
+            print("\n最近的推动:")
+            for d in r["drift"]:
+                ev = (" 事件#%s" % ",".join(str(e) for e in d["evidence"])) if d["evidence"] else ""
+                print("  %s  %-6s %+.3f  <- %s%s"
+                      % (d["ts"][:16], TRAIT_LABEL.get(d["trait"], d["trait"]),
+                         d["delta"] or 0, d["cause"], ev))
         return 0
     elif a.cmd == "freemode":
         action = {"on": "on", "off": "off", "status": "status", "run": "run"}[a.action]

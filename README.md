@@ -17,6 +17,7 @@
 - [心光竞争: 记忆如何被想起](#心光竞争-记忆如何被想起)
 - [性格类型学: 荣格 × 九型](#性格类型学-荣格--九型)
 - [性格图谱: 性格是网, 不是七个数](#性格图谱-性格是网-不是七个数)
+- [人格卡: 可以植入, 但不是脚本](#人格卡-可以植入-但不是脚本)
 - [说话风格](#说话风格)
 - [自我知识库与可塑性记忆](#自我知识库与可塑性记忆)
 - [日记层: 让"知道"变成"经历过"](#日记层-让知道变成经历过)
@@ -222,10 +223,10 @@ core_score ≥ 0.62 → 升格为核心记忆, 从此豁免衰减
 |---|---|---|
 | 1. 文本 | query | **走倒排索引**, O(命中) 而非 O(全表) |
 | 2–5. 网络 | person/theme/state/task | 通过节点走关联边 |
-| 6. 时间 | time_hint | 匹配日期或文本 |
+| 6. 时间 | time_hint | SQL `LIKE` + 只取最近 200 条(宽线索不会把候选池灌满) |
 | 7. 核心 | 恒定 | 核心分最高的 5 条默认参战 —— 人格不会被"想不起来" |
-| 8. 语义 | query | 语义层事实(答案常在这里, 不在事件里) |
-| 9. 自我知识 | query | 问"我平时怎么说/怎么做"时被点亮 |
+| 8. 语义 | query | 语义层事实(答案常在这里, 不在事件里), 按相似度排序取前 3 |
+| 9. 自我知识 | query | 问"我平时怎么说/怎么做"时被点亮, 同样按相似度排序 |
 
 打分(六维加权, 权重之和为 1):
 
@@ -332,6 +333,120 @@ core_score ≥ 0.62 → 升格为核心记忆, 从此豁免衰减
 七维 trait 不再凭空平均, 而是**从图上读出来**: 支点强度净和 × 编织系数 × 收缩(核心记忆少时不过分偏激)。
 
 **实测演化**: 受伤三个阶段 —— 0 个支点 → 长出谨慎/封闭 → 被善待后亲和支点入图, trait 被拉回。
+
+---
+
+## 人格卡: 可以植入, 但不是脚本
+
+到此为止, 性格都是"从记忆里长出来的"。问题是: 一个刚建好的识海没有记忆, 也就没有性格 ——
+想让它第一天就有点像样, 又不想写死一段 prompt 角色扮演。**植入人格卡**补的就是这个缺口。
+
+设计口径(2026-10-27 定): **种子是先验, 不是终值。**
+
+```
+       人交付的种子(只追加版本, 记忆永不改写)
+              │
+              ▼   ①软限幅 ②弹性权重 ③单步上限 ④硬边界
+       现在的我 ────────── 每一轮固结被记忆推动
+              │
+              ▼
+       人格卡正文 = 内核段(逐字不变) + "我后来变成了"(漂移叙述)
+```
+
+### 三层分离
+
+| 层 | 表 | 谁写 | 作用 |
+|---|---|---|---|
+| **种子** | `persona_seed` | 只有人 / `implant` | 交付时的样子, 版本化留档, 可回看"你当初给我的样子" |
+| **现值** | `persona_field` | 只有 `tick` 的固结 | 每一维的"现在的我", 带可塑半径 `cap` |
+| **账本** | `persona_changelog` | 上面两层 | 每次改动的时间、原因(`implant`/`recall`/`reflection`)、证据事件 id |
+
+`refresh()` 从不写种子 —— 这是整个机制的安全边界。种子只能被下一版 `implant` 追加。
+
+### 四道闸: 人格推得动, 但推不坏
+
+设种子 `s`、可塑半径 `c`、记忆观测值 `o`、现在的值 `v`:
+
+```python
+cap    = c * (1 + 0.5*min(1, 核心记忆数/5))     # 经历越多, 越有资格不是原来那个
+anchor = min(1, Σ该维支点强度 / 3)              # 这个维度被多硬的证据撑着
+rate   = 0.25 * (1 - 0.6*anchor)                # 弹性的 Fisher 代理: 撑得越硬越推不动
+target = s + cap*tanh((o - s)/cap)              # ① 软限幅: 极端经历推不出半球
+v_new  = v + rate*(target - v)
+v_new  = clamp(v_new, v-0.03, v+0.03)           # ③ 单步上限: 一轮最多动 0.03
+v_new  = clamp(v_new, s-cap, s+cap)             # ④ 硬边界: 任何情况都不越半径
+```
+
+**第五步是回弹, 免费的那种**: 某维度暂时没有支点了(记忆淡了/被压过去了), 现值每轮向种子挪 5%。
+不需要额外的"复位计时器" —— **遗忘本身就是回正机制**, 这正是识海原本就有的那一层在起作用。
+
+**为什么必须有这些闸**: 没有它们, 一条高强度创伤记忆能在几轮 tick 之内把一个温和的 agent 变成惊弓之鸟。
+它们对应神经科学里那个老问题 —— **稳定性-可塑性两难(stability-plasticity dilemma)**:
+既要能学, 又不能被最后一条消息吃掉。EWC 用 Fisher 信息给参数加二次惩罚, 这里用"该维支点强度"当代理,
+效果等价而实现只有几行加法。
+
+### 用法
+
+```bash
+# 现成底稿
+python -m shihai.cli --db shihai.db archetypes
+# cautious 谨慎的老手 / curious 好奇的探索者 / warm 温和的同伴
+# assertive 直接的合作者 / persistent 耐磨的苦工
+
+# 植入: 起点 + 内核段
+python -m shihai.cli --db shihai.db implant --archetype curious \
+  --identity "我是小海, 在一台旧笔记本上醒来。" \
+  --flux '{"curiosity":0.3,"guardedness":0.1}'
+
+# 也可以只给几个维度, 其余按默认半径
+python -m shihai.cli --db shihai.db implant --traits '{"caution":0.7,"warmth":0.6}'
+
+# 看它被推到了哪里、被谁推的
+python -m shihai.cli --db shihai.db drift
+```
+
+`drift` 输出示意:
+
+```
+人格卡 v1 的漂移账本:
+  亲和      起点 0.45 → 现在 0.54  +0.09  用掉  40% 余地  ++++++++
+  坚韧      起点 0.60 → 现在 0.67  +0.07  用掉  46% 余地  +++++++++
+  谨慎      起点 0.72 → 现在 0.72  +0.00  用掉   0% 余地
+
+最近的推动:
+  2026-10-27T10:13  亲和  +0.030  <- recall 事件#3,4
+  2026-10-27T10:13  坚韧  +0.019  <- recall 事件#3,4
+```
+
+### 默认可塑半径
+
+身份底色漂得慢, 表达层漂得快 —— 与 `self_knowledge` 的元可塑性(`identity 0.2 / style 0.8`)同源:
+
+| 维度 | 默认半径 | 理由 |
+|---|---|---|
+| 谨慎 / 封闭 / 自责 | 0.15–0.18 | 这几维一旦被经历改掉, 就是"换了个人", 该慢 |
+| 主张 | 0.20 | 中间 |
+| 亲和 / 好奇 | 0.22 / 0.25 | 关系与兴趣本来就该随经历流动 |
+
+### 重植入: 换设定不等于抹掉经历
+
+再 `implant` 一次会追加 v2、v3……**旧版本留档**。现值不会一键跳到新种子,
+而是被拉进"新种子 ± 新半径"的边界内:
+
+```python
+# 现值 0.5, 新种子 0.9, 新半径 0.1 → 现值被拉到 0.8, 而不是变成 0.9
+val = clamp(cur, seed_new - cap_new, seed_new + cap_new)
+```
+
+意思很直白: **人改了设定, 但长出来的那部分仍然算数**, 只是在新的框里。
+
+### 与"从零长出来"的关系
+
+没植入过的库行为**一点没变** —— `persona_field` 为空时 `_grow` 原样返回图谱观测值。
+两种模式可以共存: 先让它自己长, 长到某个程度再植入一份卡纠正方向, 也行。
+
+另外, `persona` 与可视化面板都走 `persist=False`: **看一眼不让人格往前走一步**。
+人格只在一件事上推进 —— `tick` 固结。
 
 ---
 
@@ -506,8 +621,9 @@ python hooks.py viz --path 我的识海.html
 |---|---|
 | 概览 KPI | 事件/核心/沉寂/节点/边/日记/好感/自我知识 |
 | **性格图谱** | 中心"我"→ trait 节点 → 支点;蓝线同向加固, 红线张力;**带时间轴滑块, 拖动看性格演化** |
-| 特质雷达 | 七维 trait 当前形状 |
+| 特质雷达 | 七维 trait 当前形状;植入过人格卡时叠一条虚线 = 交付时的起点,两条线的差就是经历干的事 |
 | 人格漂移 | 历次快照的七维折线 |
+| **谁把我推到了这里** | 漂移账本,每条记录带原因与证据事件 id |
 | 记忆衰减 | 时间 × 强度散点(核心金色、沉寂灰色)+ **指数拟合曲线与半衰期** |
 | 日记热力 | 日历格子, 色越暖好感越高 |
 | 自我知识 | 可塑性条 |
@@ -555,7 +671,10 @@ print(svc.dispatch("bootstrap", {})[1]["block"])
 | `tick` | 固结: 衰减/升格/蒸馏/反思/自我知识维护/自由行为环 |
 | `context` | 投影: 人格卡 + 风格 + 自我知识 + 日记 + 记忆 + 任务 |
 | `bootstrap` | 冷启动自举块(无 query) |
-| `persona` | 人格卡 + 类型档案 + 图谱 |
+| `persona` | 人格卡 + 类型档案 + 图谱(只读, 不推进) |
+| `implant` | 植入人格起点 |
+| `archetypes` | 列出现成人格底稿 |
+| `drift` | 人格漂移账本(谁把它推到了这里) |
 | `freemode` | on / off / status / run |
 | `selflearn` / `selfkb` / `selfconfirm` / `selfmaint` | 自我知识 CRUD 与维护 |
 | `diary` | close / recent / recall / compose / edit / export / import |
@@ -576,6 +695,12 @@ python hooks.py tick [--days N] [--free N]
 # 投影
 python hooks.py context [--query "..."] [--limit 4]
 python hooks.py bootstrap [--min 0.12]
+
+# 人格卡: 植入 / 漂移账本
+python hooks.py implant --archetype curious --identity "..." [--flux '{...}']
+python hooks.py implant --traits '{"caution":0.7}'
+python hooks.py archetypes
+python hooks.py drift [--limit 15]
 
 # 自我知识
 python hooks.py selflearn "..." [--kind identity|care|style|voice|moment]
@@ -626,6 +751,9 @@ task(id, title, status, progress, due, node_id, event_id, created, updated)
 working(id, session, key, value, updated)
 recall_log(id, ts, query, cues, hits)
 persona_snapshot(id, ts, traits, card, core_ids, created)
+persona_seed(id, version, ts, source, traits, flux, identity_text, note)      ← 植入的起点
+persona_field(trait, seed, value, cap, updated, reason)                       ← 现在的我
+persona_changelog(id, ts, version, trait, old, new, delta, cause, evidence)   ← 漂移账本
 event_tokens(token, event_id)                        ← 倒排索引
 self_knowledge(id, kind, text, trigger, plasticity, uses, wins, losses,
                source, last_used, created, updated)
@@ -648,6 +776,21 @@ warmth_ledger(id, day, delta, reason, created)
 | 10,000 | 82.5 ms | 14.5 ms | **5.7×** |
 
 小库时倒排有固定开销(多一次 join), 300 条以下全表反而更快;但记忆只增不减, **倒排是唯一不随规模恶化的方案**。
+
+**固结一轮**(v0.7.1)把升格打分从"每条事件各查一遍图"改成"整轮摊平一次":
+
+| 记忆条数 | 旧 tick | 新 tick | 提速 |
+|---|---|---|---|
+| 2,000 | 1.6 s | 0.06 s | **27×** |
+| 10,000 | 52 s | 0.47 s | **111×** |
+
+分数逐位相同(有回归断言守着), 改的只是复杂度。原先 `_pattern_recurrence` 和 `_behavior_shift` 每条事件都要重查一遍边和兄弟事件, 是 O(n²);现在 `_GraphIndex` 在一次 tick 内把"事件挂哪些节点""状态节点上挂着哪些事件"摊平成字典, 每条事件查的是 O(1)。两次全表扫描共约 30 ms, 与事件数线性相关。
+
+**召回的三处退化**(v0.7.1):
+
+- 语义层 / 自我知识层原先是"按表顺序截断前 3 条"—— 一个主题下攒到 4 条以上时, 最相关的那条会被永远挤掉。改成先按相似度排序再截断。
+- 时间线索原先把整张 events 拉进 Python 逐条比对, 宽线索(如只给年份)命中几千条就退化成 O(全库)。改成 SQL `LIKE` + 只取最近 200 条。
+- 老库升级时 `event_tokens` 是新建的空表, 不补建则文本召回静默哑掉(问什么都零条)。现在打开老库自动补一次。
 
 其他性能要点: 召回候选上限 200 条;核心记忆只取 top 5 参战(否则核心多了会稀释注意力);SQLite 开 WAL。
 
@@ -677,7 +820,7 @@ warmth_ledger(id, day, delta, reason, created)
 python tests/test_core.py
 ```
 
-**21 条端到端回归**, 每个断言对应一个真实修过的坑:
+**31 条端到端回归**, 每个断言对应一个真实修过的坑:
 
 | 测试 | 守什么 |
 |---|---|
@@ -702,6 +845,16 @@ python tests/test_core.py
 | `test_wiki_sync_and_lint` | wiki 同步与体检 |
 | `test_wiki_ingest_reverse` | wiki 修订回写库 |
 | `test_viz_renders` | HTML 无占位符、数据可解析 |
+| `test_implant_seed_is_a_prior_not_a_script` | 植入的是起点: 无记忆时不漂移, 内核段原文进卡 |
+| `test_implant_drift_is_bounded_and_audited` | 单轮 ≤0.03、不越半径、每条改动带证据 |
+| `test_look_only_does_not_move_personality` | 仪表盘/`persona` 只读, 不推进人格 |
+| `test_reimplant_keeps_history_and_caps_shift` | 重植入留旧版本, 现值只被拉到新半径边界 |
+| `test_no_implant_keeps_old_behavior` | 没植入过 = 行为与 v0.6.0 完全一致 |
+| `test_no_fulcrum_rebounds_toward_seed` | 某维失去支点后向种子回弹, 且写 `reflection` 账 |
+| `test_semantic_hits_are_ranked_not_truncated` | 语义命中 >3 条时按相似度取前 3, 不是表顺序 |
+| `test_tick_graph_index_matches_slow_path` | 图索引与逐条查询的升格分数逐位相同 |
+| `test_old_db_gets_index_backfilled` | 老库升级后自动补倒排, 文本召回不哑 |
+| `test_time_hint_does_not_scan_whole_table` | 宽时间线索限流到 200 条投票 |
 
 ---
 

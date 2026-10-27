@@ -132,15 +132,19 @@ class RecallEngine:
                     if hits / float(len(qtokens)) >= 0.22:
                         votes.append((eid, "text"))
                 # 路 8: 语义层 —— 世界事实也该被想起(答案常在这里, 不在事件里)
-                for r in self.store.conn.execute(
-                        "SELECT id, claim FROM semantic WHERE confidence>=0.45"):
-                    if _overlap(qtokens, _tokens(r["claim"])) >= 0.28:
-                        self.semantic_hits.append((r["id"], r["claim"]))
+                # 先按相似度排序再截断: 表顺序截断会把最相关的那条挤掉。
+                sem = [(round(_overlap(qtokens, _tokens(r["claim"])), 3), r["id"], r["claim"])
+                       for r in self.store.conn.execute(
+                           "SELECT id, claim FROM semantic WHERE confidence>=0.45")]
+                self.semantic_hits = [(i, c) for s, i, c in
+                                      sorted(sem, key=lambda x: -x[0]) if s >= 0.28]
                 # 路 9: 自我知识 —— 问"我平时怎么说/我怎么做事"时该被点亮
-                for r in self.store.conn.execute(
-                        "SELECT id, kind, text FROM self_knowledge"):
-                    if _overlap(qtokens, _tokens(r["text"])) >= 0.28:
-                        self.self_hits.append((r["id"], r["kind"], r["text"]))
+                own = [(round(_overlap(qtokens, _tokens(r["text"])), 3),
+                        r["id"], r["kind"], r["text"])
+                       for r in self.store.conn.execute(
+                           "SELECT id, kind, text FROM self_knowledge")]
+                self.self_hits = [(i, k, t) for s, i, k, t in
+                                  sorted(own, key=lambda x: -x[0]) if s >= 0.28]
 
         # 路 2~5: 通过节点走网络
         for kind, value, tag in (
@@ -161,11 +165,15 @@ class RecallEngine:
                 if e["dst"].startswith("event:"):
                     votes.append((int(e["dst"].split(":")[1]), tag))
 
-        # 路 6: 时间线索
+        # 路 6: 时间线索。走 SQL 的 LIKE 而不是把整表拉进 Python ——
+        # 宽线索(比如只给年份)会命中几千条, 全拉出来打分就把召回变成 O(全库)。
+        # 时间本来就是"投票"不是"筛选", 取最近 200 条足够点亮该点亮的那批。
         if cue.time_hint:
-            for row in self.store.conn.execute("SELECT id, ts, summary FROM events"):
-                if cue.time_hint in (row["ts"] or "") or cue.time_hint in row["summary"]:
-                    votes.append((row["id"], "time"))
+            like = "%" + cue.time_hint.replace("%", "").replace("_", "") + "%"
+            for row in self.store.conn.execute(
+                    "SELECT id FROM events WHERE ts LIKE ? OR summary LIKE ? "
+                    "ORDER BY id DESC LIMIT 200", (like, like)):
+                votes.append((row["id"], "time"))
 
         # 路 7: 核心记忆默认参与竞争 —— 人格不会被"想不起来"。
         # 但只取核心分最高的几条: 核心记忆多起来以后, 全部参战会稀释注意力。
@@ -201,8 +209,7 @@ class RecallEngine:
         # 每过 half_life_days 打一次对折, 与遗忘曲线一致
         recency = 0.5 ** (age_days / self.half_life_days)
 
-        # 置信度: 被证伪或反复冲突的记忆会掉分 —— 这里用情绪极值做代理
-        confidence = 1.0 - 0.35 * (1.0 if row["core"] else 0.0) * 0.0  # 占位: 核心不因自洽降分
+        # 置信度: 核心记忆是被反复验证过的, 普通记忆默认低一档
         confidence = 0.95 if row["core"] else 0.8
         if cue.mood and float(row["valence"]) * cue.mood < 0:
             emotion *= 0.6  # 心境不一致时, 反向情绪记忆更难被点亮
@@ -235,12 +242,6 @@ def _tokens(text):
     if len(s) < 2:
         return set()
     return {s[i:i + 2] for i in range(len(s) - 1)}
-
-
-def _jaccard(a, b):
-    if not a or not b:
-        return 0.0
-    return len(a & b) / float(len(a | b))
 
 
 def _overlap(a, b):

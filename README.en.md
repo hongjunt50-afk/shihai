@@ -19,6 +19,7 @@ Shihai (识海, "Sea of Consciousness") treats an agent's mind the way human mem
 - [Spotlight competition: how memories surface](#spotlight-competition-how-memories-surface)
 - [Personality typology: Jung × Enneagram](#personality-typology-jung--enneagram)
 - [Personality graph: character is a web, not seven numbers](#personality-graph-character-is-a-web-not-seven-numbers)
+- [Personality card: implantable, but not a script](#personality-card-implantable-but-not-a-script)
 - [Voice](#voice)
 - [Self-knowledge base and plastic memory](#self-knowledge-base-and-plastic-memory)
 - [Diary layer: turning "knowing" into "having lived"](#diary-layer-turning-knowing-into-having-lived)
@@ -217,10 +218,10 @@ Two easily-missed details:
 |---|---|---|
 | 1. Text | query | **inverted index**, O(hits) not O(n) |
 | 2–5. Network | person/theme/state/task | walk edges from nodes |
-| 6. Time | time_hint | date or text match |
+| 6. Time | time_hint | SQL `LIKE`, capped at the 200 most recent (a broad hint can't flood the pool) |
 | 7. Core | always | top-5 by core_score compete — personality is never "unrecallable" |
-| 8. Semantic | query | world facts (answers often live here, not in episodes) |
-| 9. Self-knowledge | query | lights up for "how do I usually speak / work" |
+| 8. Semantic | query | world facts (answers often live here, not in episodes), ranked by similarity before truncation |
+| 9. Self-knowledge | query | lights up for "how do I usually speak / work", also ranked |
 
 Scoring (six weighted dimensions, summing to 1): relevance 0.28, importance 0.22, emotion 0.18, relation 0.12, recency 0.10, confidence 0.10.
 
@@ -291,6 +292,116 @@ disintegration: the reverse
 Traits are no longer averaged out of thin air; they are **read off the graph**: net fulcrum strength × braid coefficient × shrinkage (so a handful of core memories don't produce an extremist).
 
 **Measured evolution**: hurt → 0 fulcrums → caution/guardedness emerge → kindness lands a warmth fulcrum and pulls traits back.
+
+---
+
+## Personality card: implantable, but not a script
+
+Everything so far grows *out of* memory. The catch: a fresh Shihai has no memories, therefore no personality — and
+you may want it to feel like something on day one without hardcoding a role-play prompt. **Implanting a persona card**
+fills exactly that gap.
+
+Design position (2026-10-27): **a seed is a prior, not a script.**
+
+```
+       the seed a human delivers (append-only versions, memory never rewrites it)
+              │
+              ▼   (1) soft clamp (2) elastic weight (3) step cap (4) hard bound
+       who I am now ────────── pushed by memory on every consolidation tick
+              │
+              ▼
+       card text = kernel segment (verbatim) + "how I have since changed"
+```
+
+### Three separated layers
+
+| Layer | Table | Written by | Purpose |
+|---|---|---|---|
+| **Seed** | `persona_seed` | humans / `implant` only | the delivered self, versioned, so "what you first gave me" stays answerable |
+| **Current** | `persona_field` | consolidation (`tick`) only | each dimension's "who I am now", with a plastic radius `cap` |
+| **Ledger** | `persona_changelog` | the two above | timestamp, cause (`implant`/`recall`/`reflection`) and evidence event ids per change |
+
+`refresh()` never writes the seed — that is the safety boundary of the whole mechanism. Seeds can only be appended by
+a later `implant`.
+
+### Four gates: the persona bends, it does not break
+
+With seed `s`, plastic radius `c`, observed value `o`, current value `v`:
+
+```python
+cap    = c * (1 + 0.5*min(1, n_core/5))          # more lived experience = more right to differ
+anchor = min(1, sum(fulcrum strength for this trait) / 3)
+rate   = 0.25 * (1 - 0.6*anchor)                 # Fisher proxy: hard evidence resists the push
+target = s + cap*tanh((o - s)/cap)               # (1) soft clamp: one extreme event can't win a hemisphere
+v_new  = v + rate*(target - v)
+v_new  = clamp(v_new, v-0.03, v+0.03)            # (3) step cap: at most 0.03 per consolidation
+v_new  = clamp(v_new, s-cap, s+cap)              # (4) hard bound: never outside the radius
+```
+
+**Step five is rebound, and it is free**: when a dimension temporarily has no fulcrums (memory faded or got
+overwritten), the current value drifts 5% back toward the seed per tick. No separate reset timer is needed —
+**forgetting is itself the restoring force**, and it is a layer Shihai already had.
+
+**Why the gates are mandatory**: without them a single high-intensity memory turns a gentle agent into a flinch
+response machine within a few ticks. This is the classic **stability–plasticity dilemma**: you must be able to learn
+without being eaten by the last message. EWC penalises parameters with Fisher information; this uses per-dimension
+fulcrum strength as the proxy — equivalent effect, a few lines of arithmetic.
+
+### Usage
+
+```bash
+python -m shihai.cli --db shihai.db archetypes
+# cautious / curious / warm / assertive / persistent
+
+python -m shihai.cli --db shihai.db implant --archetype curious \
+  --identity "I'm Xiao Hai. I woke up on an old laptop." \
+  --flux '{"curiosity":0.3,"guardedness":0.1}'
+
+python -m shihai.cli --db shihai.db implant --traits '{"caution":0.7,"warmth":0.6}'
+python -m shihai.cli --db shihai.db drift
+```
+
+`drift` shows where each dimension sits relative to its seed, how much of its radius is spent, and which events did
+the pushing:
+
+```
+persona v1 drift ledger:
+  warmth      seed 0.45 → now 0.54  +0.09   40% of radius used  ++++++++
+  persistence seed 0.60 → now 0.67  +0.07   46% of radius used  +++++++++
+
+recent pushes:
+  2026-10-27T10:13  warmth  +0.030  <- recall  events #3,#4
+```
+
+### Default plastic radii
+
+Identity colours move slowly, expressive layers move fast — the same meta-plasticity scale as
+`self_knowledge` (`identity 0.2 / style 0.8`):
+
+| Dimensions | Default radius | Rationale |
+|---|---|---|
+| caution / guardedness / self_blame | 0.15–0.18 | changing these means "a different person" — slow |
+| assertiveness | 0.20 | middle |
+| warmth / curiosity | 0.22 / 0.25 | relationships and interests should flow with experience |
+
+### Re-implanting keeps the life lived
+
+A second `implant` appends v2, v3, … and **keeps earlier versions**. The current value is not teleported to the new
+seed; it is pulled inside the new "seed ± radius" band, so what grew under the old card still counts:
+
+```python
+# current 0.5, new seed 0.9, new radius 0.1 → current lands on 0.8, not 0.9
+val = clamp(cur, seed_new - cap_new, seed_new + cap_new)
+```
+
+### Relationship to "grown from zero"
+
+Databases that were never implanted behave **exactly as before** — with an empty `persona_field`, `_grow` returns
+the graph's observed traits untouched. Both modes coexist: let it grow on its own, then implant a card to correct its
+heading later.
+
+Also, both `persona` and the visualization dashboard run with `persist=False`: **looking does not move the persona
+forward one step**. Personality advances in exactly one place — the `tick` consolidation.
 
 ---
 
@@ -437,7 +548,10 @@ python hooks.py viz    # → $SHIHAI_HOME/viz/shihai.html
 | `tick` | consolidate: decay / promote / distill / reflect / self-knowledge upkeep / free cycles |
 | `context` | projection: persona card + voice + self-knowledge + diary + memories + tasks |
 | `bootstrap` | cold-start block (no query needed) |
-| `persona` | persona card + typology + graph |
+| `persona` | persona card + typology + graph (read-only, no advance) |
+| `implant` | implant a persona starting point |
+| `archetypes` | list ready-made persona archetypes |
+| `drift` | persona drift ledger (what pushed it here) |
 | `freemode` | on / off / status / run |
 | `selflearn` `selfkb` `selfconfirm` `selfmaint` | self-knowledge CRUD and upkeep |
 | `diary` | close / recent / recall / compose / edit / export / import |
@@ -455,6 +569,10 @@ python hooks.py tell --text "..." [--importance 0.8] [--self]
 python hooks.py tick [--days N] [--free N]
 python hooks.py context [--query "..."] [--limit 4]
 python hooks.py bootstrap [--min 0.12]
+python hooks.py implant --archetype curious --identity "..." [--flux '{...}']
+python hooks.py implant --traits '{"caution":0.7}'
+python hooks.py archetypes
+python hooks.py drift [--limit 15]
 python hooks.py selflearn "..." [--kind identity|care|style|voice|moment]
 python hooks.py selfkb [--kind ...]
 python hooks.py selfmaint
@@ -487,7 +605,8 @@ See the Chinese README for the full field list; the tables are:
 
 ```
 raw_log, events, nodes, edges, semantic, relation, task, working,
-recall_log, persona_snapshot, event_tokens, self_knowledge, diary, warmth_ledger
+recall_log, persona_snapshot, event_tokens, self_knowledge, diary, warmth_ledger,
+persona_seed, persona_field, persona_changelog
 ```
 
 Reference formats in edges: `event:12` / `node:7` / `semantic:3` / `persona:graph`
@@ -504,7 +623,24 @@ Inverted index (v0.6.0) replaces the full table scan:
 | 3,000 | 25.2 ms | 7.5 ms | **3.4×** |
 | 10,000 | 82.5 ms | 14.5 ms | **5.7×** |
 
-Memories only accumulate, so the inverted index is the only option that does not degrade with scale. Recall candidates are capped at 200; only the top-5 core memories compete (otherwise many cores would dilute attention); SQLite runs in WAL mode.
+Memories only accumulate, so the inverted index is the only option that does not degrade with scale.
+
+**One consolidation tick** (v0.7.1) no longer re-queries the graph per event — the graph is flattened once per tick:
+
+| Memories | Old tick | New tick | Speedup |
+|---|---|---|---|
+| 2,000 | 1.6 s | 0.06 s | **27×** |
+| 10,000 | 52 s | 0.47 s | **111×** |
+
+Scores are bit-for-bit identical (a regression test guards this); only the complexity changed. `_pattern_recurrence` and `_behavior_shift` used to re-query edges and sibling events for every event — O(n²). `_GraphIndex` now flattens "which nodes does each event hang on" and "which events hang on each state node" into dicts once per tick, so each event is O(1). The two full scans cost ~30 ms and scale linearly.
+
+**Three recall regressions fixed** (v0.7.1):
+
+- The semantic and self-knowledge layers used to keep the first 3 hits *in table order* — once a topic accumulated 4+ facts, the most relevant one could never surface. Now they are ranked by similarity before truncating.
+- The time-hint path used to pull the whole `events` table into Python; a broad hint (year only) matching thousands of rows degraded to O(whole library). Now it is a SQL `LIKE` capped at the 200 most recent rows.
+- Upgrading an old database left `event_tokens` as an empty new table, silently killing text recall (zero hits for any query). Opening an old database now backfills it once.
+
+Other performance notes: recall candidates are capped at 200; only the top-5 core memories compete (otherwise many cores would dilute attention); SQLite runs in WAL mode.
 
 ---
 
@@ -525,10 +661,10 @@ Memories only accumulate, so the inverted index is the only option that does not
 ## Tests
 
 ```bash
-python tests/test_core.py   # 21 end-to-end regressions
+python tests/test_core.py   # 31 end-to-end regressions
 ```
 
-Each assertion guards a bug that was actually fixed: virtual clock, short-query recall, inverted-index speed, typology convergence, mem0-style conflict resolution, free-mode divergence, persona-graph evolution, voice/self-knowledge wiring, plasticity LTP/LTD, no-query bootstrap, identity never reclaimed, three-layer recall, diary anchors, human-edit protection, LLM enrichment + fallback, wiki sync/lint, wiki reverse ingest, and viz rendering.
+Each assertion guards a bug that was actually fixed: virtual clock, short-query recall, inverted-index speed, typology convergence, mem0-style conflict resolution, free-mode divergence, persona-graph evolution, voice/self-knowledge wiring, plasticity LTP/LTD, no-query bootstrap, identity never reclaimed, three-layer recall, diary anchors, human-edit protection, LLM enrichment + fallback, wiki sync/lint, wiki reverse ingest, viz rendering, (v0.7.0) persona implantation: seed-as-prior, bounded and audited drift, read-only lookups, re-implant history, rebound when a dimension loses its fulcrums, and unchanged behaviour for never-implanted libraries, and (v0.7.1) retrieval hardening: ranked semantic hits, graph-index equivalence for core scoring, old-database index backfill, and time-hint flood control.
 
 ---
 

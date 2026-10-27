@@ -142,6 +142,60 @@ def cmd_context(args):
     store.close()
 
 
+def cmd_implant(args):
+    store, _, _, _, pers = build(args.db)
+    traits = json.loads(args.traits) if args.traits else None
+    flux = json.loads(args.flux) if args.flux else None
+    version, seed, fl = pers.implant(
+        traits=traits, archetype=args.archetype, flux=flux,
+        identity_text=args.identity, note=args.note)
+    print("已植入人格卡 v%d:" % version)
+    for k, v in sorted(seed.items(), key=lambda kv: -kv[1]):
+        print("  %-14s %.2f  (可塑半径 ±%.2f)" % (TRAIT_LABEL.get(k, k), v, fl.get(k, 0.15)))
+    if args.identity:
+        print("\n内核段(记忆永不改写): %s" % args.identity)
+    print("\n这只是起点。之后每轮 tick, 记忆会把它往自己的方向推 ——")
+    print("单轮最多 %.2f, 且推不出上面那些半径。" % 0.03)
+    print("\n" + pers.refresh().card)
+    store.close()
+
+
+def cmd_archetypes(args):
+    from .persona import ARCHETYPES
+    for k, v in ARCHETYPES.items():
+        tops = sorted(v["traits"].items(), key=lambda kv: -kv[1])[:2]
+        print("%-12s %-8s %s" % (k, v["name"], ", ".join(
+            "%s %.2f" % (TRAIT_LABEL.get(a, a), b) for a, b in tops)))
+
+
+def cmd_drift(args):
+    store, _, _, _, pers = build(args.db)
+    info = pers.seed_info()
+    if info is None:
+        print("(没有植入过人格卡 —— 这张脸是纯粹从记忆里长出来的)")
+        store.close()
+        return
+    seed_traits, flux, _, version = info
+    fields = store.persona_fields()
+    print("人格卡 v%d 的漂移账本:" % version)
+    for t, f in sorted(fields.items(), key=lambda kv: -abs(kv[1]["value"] - kv[1]["seed"])):
+        d = f["value"] - f["seed"]
+        cap = flux.get(t, 0.15)
+        bar = ("+" if d > 0 else "-") * min(20, int(abs(d) / max(cap, 1e-6) * 20))
+        print("  %-14s 起点 %.2f → 现在 %.2f  %+.2f  用掉 %3.0f%% 余地  %s"
+              % (TRAIT_LABEL.get(t, t), f["seed"], f["value"], d,
+                 100 * abs(d) / max(cap, 1e-6), bar))
+    rows = store.persona_changelog(limit=args.limit)
+    if rows:
+        print("\n最近的推动:")
+        for r in rows:
+            ev = json.loads(r["evidence"] or "[]")
+            print("  %s  %-10s %+.3f  <- %s%s" % (
+                r["ts"][:16], TRAIT_LABEL.get(r["trait"], r["trait"]), r["delta"] or 0,
+                r["cause"], (" 事件#%s" % ",".join(str(e) for e in ev)) if ev else ""))
+    store.close()
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shihai")
     p.add_argument("--db", default="shihai.db")
@@ -172,6 +226,21 @@ def main(argv=None):
 
     s = sub.add_parser("persona", help="打印人格卡")
     s.set_defaults(func=cmd_persona)
+
+    im = sub.add_parser("implant", help="植入人格卡(起点, 之后仍会被记忆推动)")
+    im.add_argument("--archetype", help="现成底稿: cautious/curious/warm/assertive/persistent")
+    im.add_argument("--traits", help='json, 如 {"caution":0.7,"warmth":0.5}')
+    im.add_argument("--flux", help='json, 每维可塑半径, 如 {"curiosity":0.3}')
+    im.add_argument("--identity", help="内核段: 逐字进人格卡, 记忆永不改写")
+    im.add_argument("--note")
+    im.set_defaults(func=cmd_implant)
+
+    ar = sub.add_parser("archetypes", help="列出可用的现成人格底稿")
+    ar.set_defaults(func=cmd_archetypes)
+
+    dr = sub.add_parser("drift", help="人格漂移账本: 谁把我推到了这里")
+    dr.add_argument("--limit", type=int, default=15)
+    dr.set_defaults(func=cmd_drift)
 
     st = sub.add_parser("stats", help="统计")
     st.set_defaults(func=cmd_stats)

@@ -13,12 +13,54 @@
 第四条需要一个外部信号: 之后的记忆是否与它关联(behavior_shift)。
 """
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 from .store import utcnow
 
 # 核心记忆升格阈值
 CORE_THRESHOLD = 0.62
+
+
+class _GraphIndex:
+    """一次 tick 内的图快照: 事件挂哪些节点、状态节点上挂着哪些事件。
+    tick 期间图不变(升格只改 events 的 core/dormant, 不动边), 所以摊平一次就够。"""
+
+    def __init__(self, store):
+        self._ev_nodes = {}
+        self._state_ev = {}
+        states = {r["id"] for r in store.conn.execute(
+            "SELECT id FROM nodes WHERE kind='state'")}
+        dormant = {r["id"] for r in store.conn.execute(
+            "SELECT id FROM events WHERE dormant=1")}
+        for r in store.conn.execute("SELECT src, dst FROM edges WHERE dst LIKE 'node:%'"):
+            if not r["src"].startswith("event:"):
+                continue
+            eid = int(r["src"].split(":")[1])
+            self._ev_nodes.setdefault(eid, set()).add(r["dst"])
+            if int(r["dst"].split(":")[1]) in states and eid not in dormant:
+                self._state_ev.setdefault(r["dst"], set()).add(eid)
+        self._live = [r["id"] for r in store.conn.execute(
+            "SELECT id FROM events WHERE dormant=0 ORDER BY id")]
+
+    def pattern_recurrence(self, event_id):
+        siblings = set()
+        for nref in self._ev_nodes.get(event_id, ()):
+            siblings |= self._state_ev.get(nref, set())
+        siblings.discard(event_id)
+        return min(1.0, len(siblings) / 3.0)
+
+    def behavior_shift(self, event_id):
+        src = self._ev_nodes.get(event_id)
+        if not src:
+            return 0.0
+        # 慢路径的口径是 "id 之后 60 条非休眠事件", 休眠事件本身也照样往后看
+        i = bisect_right(self._live, event_id) - 1
+        overlap = 0
+        for rid in self._live[i + 1:i + 61]:
+            if self._ev_nodes.get(rid, set()) & src:
+                overlap += 1
+        return min(1.0, overlap / 3.0)
 
 
 @dataclass
@@ -126,8 +168,14 @@ class Lifecycle:
         rows = self.store.conn.execute(
             "SELECT * FROM events WHERE core=0 AND dormant=0"
         ).fetchall()
+        if not rows:
+            return promoted
+        # 升格要看"这条事件影响了之后哪些记忆"和"这种感受复现过几次",
+        # 两条都靠图。原先每条事件各自去查一遍边和兄弟事件, 一万条要 80 秒;
+        # 图在一次 tick 内不变, 所以先摊平成索引, 权当一次全表扫描。
+        idx = _GraphIndex(self.store)
         for row in rows:
-            s = self._core_score(row)
+            s = self._core_score(row, idx)
             self.store.conn.execute(
                 "UPDATE events SET core_score=? WHERE id=?", (s, row["id"])
             )
@@ -141,7 +189,7 @@ class Lifecycle:
         self.store.conn.commit()
         return promoted
 
-    def _core_score(self, row):
+    def _core_score(self, row, idx=None):
         """五个维度: 情绪强度 / 反复召回 / 自我相关 / 行为改变 / 模式复现。
         创伤走前两条(一次重击即可核心), 性格塑造走最后一条(同种感受反复出现)。
         这也是"普通记忆会被遗忘, 核心记忆不会"的分界线。"""
@@ -157,9 +205,9 @@ class Lifecycle:
         repeated = min(1.0, row["access_count"] / 5.0)
         self_rel = float(row["self_relevance"])
         # 行为改变: 之后出现与该事件共享节点的记忆 = 它确实影响了后续
-        shifted = self._behavior_shift(row["id"])
+        shifted = self._behavior_shift(row["id"], idx)
         # 模式复现: 与其他事件共享同一情绪状态节点 = 这种感受不是一次性的
-        pattern = self._pattern_recurrence(row["id"])
+        pattern = self._pattern_recurrence(row["id"], idx)
         # 心理伤害/回避型事件额外加权(手稿里的"封存"通道)
         impact_bonus = 0.15 * float(row["impact"]) + 0.1 * float(row["avoidance"])
 
@@ -167,9 +215,11 @@ class Lifecycle:
                    0.32 * emotional + 0.22 * repeated + 0.16 * self_rel
                    + 0.14 * shifted + 0.16 * pattern + impact_bonus)
 
-    def _pattern_recurrence(self, event_id):
+    def _pattern_recurrence(self, event_id, idx=None):
         """同一情绪状态节点挂在多少个其他事件上。
         "又开心了一次"和"第一次开心"在性格塑造上完全不同。"""
+        if idx is not None:
+            return idx.pattern_recurrence(event_id)
         siblings = set()
         for e in self.store.edges_from("event:%d" % event_id):
             if not e["dst"].startswith("node:"):
@@ -190,7 +240,9 @@ class Lifecycle:
                         siblings.add(other)
         return min(1.0, len(siblings) / 3.0)
 
-    def _behavior_shift(self, event_id):
+    def _behavior_shift(self, event_id, idx=None):
+        if idx is not None:
+            return idx.behavior_shift(event_id)
         later = self.store.conn.execute(
             "SELECT id FROM events WHERE id > ? AND dormant=0 LIMIT 60", (event_id,)
         ).fetchall()

@@ -17,10 +17,12 @@ API(全部幂等, 无隐式状态):
     tick    {days?, free_cycles?}                  -> 固结 + 可选自由行为环
     context {query?, limit?}                       -> 投影: 注入用记忆文档块
     persona {}                                     -> 人格卡 + 类型档案
+    implant {traits?, archetype?, flux?, identity_text?}  -> 植入人格起点
+    drift   {limit?}                               -> 人格漂移账本
     freemode {action: on/off/status/run, cycles?}  -> 自由模式控制
     stats    {}                                    -> 库况
 
-服务端不联网、不发布、不删库; 所有状态在 SHIHAI_HOME(默认 F:\MyDeck\shihai)。
+服务端不联网、不发布、不删库; 所有状态在 SHIHAI_HOME(默认 ~/.shihai)。
 """
 
 import json
@@ -38,6 +40,7 @@ from .kb import SelfKB
 from .diary import DiaryEngine
 from .wiki import Wiki
 from .viz import render as render_viz
+from .viz import render_string as render_viz_html
 from . import home as H
 
 
@@ -138,11 +141,47 @@ class ShihaiService:
         }
 
     def h_persona(self, a):
-        card = self.persona.refresh()
-        profile = self.typology.infer(persist=True)
+        """只读: 报当前人格卡。人格的推进只发生在 tick 固结里,
+        查一次就往前走一步会让"看"这个动作变成经历。"""
+        card = self.persona.refresh(persist=False)
         return {"card": card.card, "traits": card.traits,
                 "core_ids": card.core_ids, "voice": card.voice,
-                "typology": profile.to_dict()}
+                "typology": card.typology,
+                "seed": card.seed, "drift": card.drift, "version": card.version}
+
+    def h_implant(self, a):
+        """主动植入人格卡。给的是起点, 不是脚本 —— 之后的记忆会推它, 但推不快也推不远。"""
+        version, traits, flux = self.persona.implant(
+            traits=a.get("traits"), archetype=a.get("archetype"),
+            flux=a.get("flux"), identity_text=a.get("identity_text"),
+            note=a.get("note"), source=a.get("source", "human"))
+        card = self.persona.refresh()
+        return {"version": version, "seed": traits, "flux": flux,
+                "traits": card.traits, "card": card.card}
+
+    def h_archetypes(self, a):
+        from .persona import ARCHETYPES
+        return {"archetypes": {k: {"name": v["name"], "traits": v["traits"]}
+                               for k, v in ARCHETYPES.items()}}
+
+    def h_drift(self, a):
+        """人格漂移账本: 每一条维度改动是谁推的、被哪条记忆推的。"""
+        rows = self.store.persona_changelog(limit=int(a.get("limit", 40)))
+        seed_info = self.persona.seed_info()
+        fields = self.store.persona_fields()
+        return {
+            "version": seed_info[3] if seed_info else 0,
+            "fields": [{"trait": t, "seed": f["seed"], "value": f["value"],
+                        "cap": f["cap"],
+                        "used": round(min(1.0, abs(f["value"] - f["seed"]) / f["cap"]), 3)
+                        if f["cap"] else 0.0}
+                       for t, f in sorted(fields.items(),
+                                          key=lambda kv: -abs(kv[1]["value"] - kv[1]["seed"]))],
+            "drift": [{"ts": r["ts"], "trait": r["trait"],
+                       "old": r["old"], "new": r["new"], "delta": r["delta"],
+                       "cause": r["cause"],
+                       "evidence": json.loads(r["evidence"] or "[]"),
+                       "version": r["version"]} for r in rows]}
 
     def h_freemode(self, a):
         act = a.get("action", "status")
@@ -264,7 +303,14 @@ class ShihaiService:
         return {"root": self.wiki.root}
 
     def h_viz(self, a):
-        """生成单文件 HTML 可视化仪表盘。"""
+        """生成单文件 HTML 可视化仪表盘。
+
+        inline=True 直接返回 HTML 字符串, 不落盘 —— 给要现成页面的宿主(DSH 面板)用。
+        """
+        if a.get("inline"):
+            return {"html": render_viz_html(self.store,
+                                            persona_engine=self.persona,
+                                            typology_engine=self.typology)}
         path = a.get("path") or os.path.join(H.SHIHAI_HOME, "viz", "shihai.html")
         p, size = render_viz(self.store, path, persona_engine=self.persona,
                              typology_engine=self.typology)
@@ -272,7 +318,9 @@ class ShihaiService:
 
     HANDLERS = {
         "tell": h_tell, "ask": h_ask, "tick": h_tick, "context": h_context,
-        "persona": h_persona, "freemode": h_freemode, "stats": h_stats,
+        "persona": h_persona, "implant": h_implant, "archetypes": h_archetypes,
+        "drift": h_drift,
+        "freemode": h_freemode, "stats": h_stats,
         "selflearn": h_selflearn, "selfkb": h_selfkb, "selfconfirm": h_selfconfirm,
         "bootstrap": h_bootstrap, "selfmaint": h_selfmaint,
         "diary": h_diary, "warmth": h_warmth, "wiki": h_wiki,

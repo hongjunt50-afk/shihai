@@ -93,7 +93,7 @@ class PersonalityGraphEngine:
     def __init__(self, store):
         self.store = store
 
-    def weave(self):
+    def weave(self, *, persist=True):
         rows = self.store.conn.execute(
             "SELECT * FROM events WHERE core=1 AND dormant=0 ORDER BY id"
         ).fetchall()
@@ -109,7 +109,8 @@ class PersonalityGraphEngine:
         traits = self._read_traits(fulcrums, braids)
         g = PersonaGraph(fulcrums=fulcrums, braids=braids, traits=traits,
                          tensions=tensions, summary=self._summarize(fulcrums, braids))
-        self._persist(g)
+        if persist:
+            self._persist(g)
         return g
 
     # -- 编织 ------------------------------------------------------------

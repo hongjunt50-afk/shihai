@@ -141,6 +141,44 @@ CREATE TABLE IF NOT EXISTS persona_snapshot (
     created    TEXT NOT NULL
 );
 
+-- 人格种子: 被主动植入的性格起点(2026-10-27)。
+-- 只追加版本, 永不原地改 —— 人交付的样子是一份可回看的档案, 不是一行配置。
+-- 种子给的是"先验", 不是"终值": 之后的记忆会把它推向别处(persona_field 才是现值)。
+CREATE TABLE IF NOT EXISTS persona_seed (
+    id            INTEGER PRIMARY KEY,
+    version       INTEGER NOT NULL,
+    ts            TEXT NOT NULL,
+    source        TEXT DEFAULT 'human',  -- human/import/archetype
+    traits        TEXT NOT NULL,         -- json 七维先验 0~1
+    flux          TEXT NOT NULL,         -- json 每维可塑半径(允许被推多远)
+    identity_text TEXT,                  -- 内核段: 逐字进人格卡, 记忆永不改写它
+    note          TEXT
+);
+
+-- 生长期望值: 每一维"现在的我"。refresh 只写这张表, 从不写 persona_seed。
+CREATE TABLE IF NOT EXISTS persona_field (
+    trait   TEXT PRIMARY KEY,
+    seed    REAL NOT NULL,          -- 植入时的起点(冗余存一份, 便于算漂移)
+    value   REAL NOT NULL,          -- 现在的值
+    cap     REAL NOT NULL DEFAULT 0.15,
+    updated TEXT,
+    reason  TEXT
+);
+
+-- 人格变更日志: 只追加。回答"我什么时候、被哪条记忆推到了这里"。
+CREATE TABLE IF NOT EXISTS persona_changelog (
+    id       INTEGER PRIMARY KEY,
+    ts       TEXT NOT NULL,
+    version  INTEGER,               -- 当时的种子版本
+    trait    TEXT NOT NULL,         -- 七维之一; '*' 表示种子本身换了
+    old      REAL,
+    new      REAL,
+    delta    REAL,
+    cause    TEXT,                  -- implant / recall / reflection
+    evidence TEXT                   -- json [event_id...] 最有力的那条证据
+);
+CREATE INDEX IF NOT EXISTS idx_changelog_ts ON persona_changelog(ts);
+
 -- 检索索引: 事件的二字组倒排(2026-10-19 优化1)。
 -- 不用 FTS5 是因为中文没有词边界, unicode61 只能切整段;
 -- 二字组倒排更准, 且纯 SQL 就能做 O(命中) 而不是 O(n) 全表。
@@ -218,6 +256,10 @@ def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _clamp(x, lo=0.0, hi=1.0):
+    return max(lo, min(hi, x))
+
+
 def _claim_tokens(claim):
     """语义断言的粗粒度词组重叠(与 recall._tokens 同思路)。"""
     s = "".join(ch for ch in claim if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
@@ -260,6 +302,15 @@ class Store:
     def __init__(self, path=":memory:"):
         self.path = path
         self.conn = connect(path)
+        self._backfill_tokens()
+
+    def _backfill_tokens(self):
+        """老库升级: event_tokens 是后加的表, 建表后是空的, 但 events 有数据。
+        不补的话路 1 静默哑掉(问什么都召回零条), 补一次几百毫秒, 只发生一次。"""
+        if self.conn.execute("SELECT 1 FROM event_tokens LIMIT 1").fetchone():
+            return
+        if self.conn.execute("SELECT 1 FROM events LIMIT 1").fetchone():
+            self.reindex_all()
 
     # -- 原始日志 -------------------------------------------------------
     def log_raw(self, content, ts=None, session=None, modality="text", meta=None):
@@ -656,6 +707,72 @@ class Store:
         return self.conn.execute(
             "SELECT * FROM persona_snapshot ORDER BY id DESC LIMIT 1"
         ).fetchone()
+
+    # -- 人格种子(主动植入) ----------------------------------------------
+    def implant_seed(self, traits, flux, identity_text=None, source="human", note=None):
+        """植入一份人格起点。只追加版本 —— 旧版本留在表里, 可回看"你当初给我的样子"。
+
+        重植入时现值重新锚定到新种子上(而不是保留旧现值), 但只动在 flux 半径内的
+        部分: 已经长出的人格如果与新种子相差超出半径, 会把现值拉到边界上, 而不是
+        一键抹平 —— 人改了设定, 经历留下的痕迹仍然算数。
+        """
+        now = utcnow()
+        row = self.conn.execute("SELECT MAX(version) v FROM persona_seed").fetchone()
+        version = int(row["v"] or 0) + 1
+        self.conn.execute(
+            """INSERT INTO persona_seed(version, ts, source, traits, flux, identity_text, note)
+               VALUES (?,?,?,?,?,?,?)""",
+            (version, now, source, json.dumps(traits, ensure_ascii=False),
+             json.dumps(flux, ensure_ascii=False), identity_text, note))
+        for trait, seed in traits.items():
+            cap = float(flux.get(trait, 0.15))
+            cur = self.conn.execute(
+                "SELECT value FROM persona_field WHERE trait=?", (trait,)).fetchone()
+            val = float(seed) if cur is None else _clamp(float(cur["value"]), seed - cap, seed + cap)
+            self.conn.execute(
+                """INSERT INTO persona_field(trait, seed, value, cap, updated, reason)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(trait) DO UPDATE SET seed=excluded.seed, value=excluded.value,
+                     cap=excluded.cap, updated=excluded.updated, reason=excluded.reason""",
+                (trait, float(seed), val, cap, now, "implant:v%d" % version))
+            self.log_persona_change(trait, cur["value"] if cur else None, val,
+                                    "implant", version=version)
+        self.conn.commit()
+        return version
+
+    def current_seed(self):
+        return self.conn.execute(
+            "SELECT * FROM persona_seed ORDER BY version DESC LIMIT 1").fetchone()
+
+    def persona_fields(self):
+        rows = self.conn.execute("SELECT * FROM persona_field").fetchall()
+        return {r["trait"]: {"seed": float(r["seed"]), "value": float(r["value"]),
+                             "cap": float(r["cap"]), "reason": r["reason"]}
+                for r in rows}
+
+    def set_persona_field(self, trait, value, reason=None):
+        self.conn.execute(
+            "UPDATE persona_field SET value=?, updated=?, reason=? WHERE trait=?",
+            (float(value), utcnow(), reason, trait))
+        self.conn.commit()
+
+    def log_persona_change(self, trait, old, new, cause, evidence=None, version=None):
+        # old=None 表示第一次锚定 —— 那件事 persona_seed 自己已经记着了, 不重复记
+        if old is None or abs(float(new) - float(old)) < 1e-6:
+            return None
+        cur = self.conn.execute(
+            """INSERT INTO persona_changelog(ts, version, trait, old, new, delta, cause, evidence)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (utcnow(), version, trait,
+             None if old is None else round(float(old), 4), round(float(new), 4),
+             None if old is None else round(float(new) - float(old), 4),
+             cause, json.dumps(evidence or [], ensure_ascii=False)))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def persona_changelog(self, limit=40):
+        return self.conn.execute(
+            "SELECT * FROM persona_changelog ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     def close(self):
         self.conn.close()

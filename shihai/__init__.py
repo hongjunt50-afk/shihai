@@ -45,4 +45,4 @@ __all__ = [
     "SelfKB", "Bootstrap", "SELF_KINDS",
     "DiaryEngine", "Wiki", "render_viz",
 ]
-__version__ = "0.6.0"
+__version__ = "0.7.1"

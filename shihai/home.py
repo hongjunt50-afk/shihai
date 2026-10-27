@@ -7,14 +7,14 @@ r"""识海的落位与初始化。
     识海 SQLite + 固结循环是"库本体", 以外部服务形态存活在会话之间。
     换 agent 平台只换投影的渲染方式, 本体原样搬走。
 
-落位规则(遵循 2026-10-10 C 盘 AI 数据全量落 F 盘的硬性要求):
-    默认 ~/.shihai(跨平台); 本机想放别的盘就设 SHIHAI_HOME 环境变量。
+落位规则:
+    默认 ~/.shihai(跨平台); 想放别的盘就设 SHIHAI_HOME 环境变量。
 """
 
 import json
 import os
 
-# 识海的家。环境变量可覆盖(测试用), 默认落 MyDeck。
+# 识海的家。环境变量可覆盖(测试/多实例用), 默认 ~/.shihai。
 SHIHAI_HOME = os.environ.get("SHIHAI_HOME", os.path.join(os.path.expanduser("~"), ".shihai"))
 
 DB_PATH = os.path.join(SHIHAI_HOME, "shihai.db")          # 识海库本体

@@ -62,12 +62,16 @@ def collect(store, persona_engine=None, typology_engine=None, kb=None, diary=Non
     }
 
     # 类型 / 特质
+    # persist=False: 仪表盘是只读视图。若在这里写 persona_snapshot,
+    # 每打开一次面板就多一个数据点, 漂移曲线会被"看"这个动作本身污染。
     typology, traits, card = {}, {}, ""
+    seed, drift = {}, {}
     if persona_engine is not None:
-        pc = persona_engine.refresh()
+        pc = persona_engine.refresh(persist=False)
         traits = pc.traits
         card = pc.card
         typology = pc.typology
+        seed, drift = pc.seed, pc.drift
         overview["name"] = persona_engine.name
     elif typology_engine is not None:
         p = typology_engine.infer(persist=False)
@@ -76,7 +80,7 @@ def collect(store, persona_engine=None, typology_engine=None, kb=None, diary=Non
     # 性格图谱: 支点 + 编织
     graph = {"fulcrums": [], "braids": [], "tensions": [], "summary": ""}
     if persona_engine is not None and hasattr(persona_engine, "graph_engine"):
-        g = persona_engine.graph_engine.weave()
+        g = persona_engine.graph_engine.weave(persist=False)
         graph = g.to_dict()
 
     # 人格漂移: 历次快照的 trait
@@ -153,7 +157,11 @@ def collect(store, persona_engine=None, typology_engine=None, kb=None, diary=Non
     return {"overview": overview, "typology": typology, "traits": traits,
             "card": card, "graph": graph, "history": history, "memories": mem,
             "days": days, "selfkb": selfkb, "relations": relations,
-            "timeline": timeline,
+            "timeline": timeline, "seed": seed, "drift": drift,
+            "changelog": [{"ts": r["ts"][:16], "trait": r["trait"],
+                           "delta": r["delta"], "cause": r["cause"],
+                           "evidence": json.loads(r["evidence"] or "[]")}
+                          for r in store.persona_changelog(limit=30)],
             "lint": {k: v[:8] for k, v in lint.items()},
             "generated": utcnow()}
 
@@ -222,6 +230,9 @@ footer{color:var(--dim);font-size:11px;padding:0 28px 28px}
     <svg id="radar" viewBox="0 0 320 300"></svg></section>
   <section class="card"><h2>人格漂移</h2><p class="hint">历次人格快照的维度变化 —— 性格是被经历推着走的。</p>
     <svg id="drift" viewBox="0 0 460 280"></svg><div class="legend" id="dlegend"></div></section>
+  <section class="card"><h2>谁把我推到了这里</h2>
+    <p class="hint">每条维度的改动都留了账: 什么时候、被哪条记忆推的。</p>
+    <ul class="self" id="changelog"></ul></section>
   <section class="card wide"><h2>记忆衰减</h2>
     <p class="hint">横轴时间(天), 纵轴剩余强度。核心记忆豁免衰减(高亮), 沉寂变灰。</p>
     <svg id="decay" viewBox="0 0 900 300"></svg>
@@ -354,6 +365,18 @@ drawGraph();
     svg.appendChild(el("polygon",{points:pts,fill:"#7aa2f7","fill-opacity":.22,
       stroke:"#7aa2f7","stroke-width":1.6}));
   }
+  // 虚线 = 被植入时的起点。实线是现在的我, 两条线之间的差就是经历干的事。
+  const sd=D.seed||{};
+  if(Object.keys(sd).length){
+    const pts=keys.map((k,i)=>{
+      const a=-Math.PI/2+i*2*Math.PI/keys.length, v=sd[k]||0;
+      return `${cx+R*v*Math.cos(a)},${cy+R*v*Math.sin(a)}`;}).join(" ");
+    svg.appendChild(el("polygon",{points:pts,fill:"none",stroke:"#e0af68",
+      "stroke-width":1.2,"stroke-dasharray":"4 3"}));
+    $("#radar").insertAdjacentHTML("afterend",
+      `<div class="legend"><span><i style="background:#e0af68"></i>植入时的起点</span>
+       <span><i style="background:#7aa2f7"></i>现在的我</span></div>`);
+  }
 })();
 
 /* ---- 漂移折线 ---- */
@@ -385,6 +408,21 @@ drawGraph();
     persistence:"坚韧",guardedness:"封闭",self_blame:"自责"};
   $("#dlegend").innerHTML=keys.map(k=>
     `<span><i style="background:${colors[k]}"></i>${TL2[k]||k}</span>`).join("");
+})();
+
+/* ---- 漂移账本 ---- */
+(function(){
+  const rows=D.changelog||[], ul=$("#changelog");
+  if(!rows.length){ul.innerHTML='<li style="color:#7b8798">还没有改动记录。植入人格卡、再跑几次 tick 之后, 这里会出现每一条推动的来由。</li>';return;}
+  const TL={caution:"谨慎",warmth:"亲和",assertiveness:"主张",curiosity:"好奇",
+    persistence:"坚韧",guardedness:"封闭",self_blame:"自责"};
+  ul.innerHTML=rows.map(r=>{
+    const d=(r.delta>0?"+":"")+(r.delta===null?"":r.delta.toFixed(3));
+    const ev=(r.evidence&&r.evidence.length)?` 事件#${r.evidence.join(",")}`:"";
+    return `<li><span class="tag">${r.ts}</span><span>${TL[r.trait]||r.trait}</span>
+      <span style="color:${r.delta>0?"#9ece6a":"#f7768e"};font-variant-numeric:tabular-nums">${d}</span>
+      <span class="tag">${r.cause}</span><span style="color:#7b8798;font-size:11px">${ev}</span></li>`;
+  }).join("");
 })();
 
 /* ---- 记忆衰减散点 ---- */
@@ -508,8 +546,8 @@ $("#card").textContent = D.card || "(人格卡尚未生成)";
 </script></body></html>"""
 
 
-def render(store, path=None, *, persona_engine=None, typology_engine=None):
-    """生成单文件 HTML 仪表盘。返回 (路径, 字节数)。"""
+def render_string(store, *, persona_engine=None, typology_engine=None):
+    """只算 HTML 字符串, 不落盘。给 DSH 面板这类「要一份现成页面」的宿主用。"""
     data = collect(store, persona_engine=persona_engine,
                    typology_engine=typology_engine)
     name = data["overview"].get("name") or "agent"
@@ -519,11 +557,17 @@ def render(store, path=None, *, persona_engine=None, typology_engine=None):
         sub = "荣格主导 %s · 九型 %sd%d · 健康 %.2f" % (
             t.get("jung_dominant", "?"), t.get("ennea_type", 0),
             t.get("ennea_wing", 0), t.get("health", 0))
-    html = (HTML
+    return (HTML
             .replace("__NAME__", name)
             .replace("__SUB__", sub)
             .replace("__GEN__", data["generated"])
             .replace("__DATA__", json.dumps(data, ensure_ascii=False)))
+
+
+def render(store, path=None, *, persona_engine=None, typology_engine=None):
+    """生成单文件 HTML 仪表盘。返回 (路径, 字节数)。"""
+    html = render_string(store, persona_engine=persona_engine,
+                         typology_engine=typology_engine)
     if path is None:
         path = os.path.join(os.getcwd(), "shihai-viz.html")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)

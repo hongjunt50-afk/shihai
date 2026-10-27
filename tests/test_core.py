@@ -2,6 +2,7 @@
 """识海回归测试: 这几天修过的每个坑都固化成断言。"""
 import os
 import sys
+import json
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -347,6 +348,96 @@ def test_token_index_speed():
         store.close()
 
 
+def test_old_db_gets_index_backfilled():
+    """老库升级: event_tokens 是后加的表, 建好之后是空的, 必须补一次。
+    不补的话文本召回静默哑掉 —— 问什么都零条, 看起来像"没记住", 实际是没索引。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "old.db")
+        store = Store(path)
+        ing = Ingestor(store)
+        ing.ingest(Observation("用户说项目进度太慢, 我准备周五前整理完接口文档"))
+        ing.ingest(Observation("用户带我去公园看猫, 三花一直蹭我的手"))
+        store.conn.execute("DELETE FROM event_tokens")   # 模拟升级前没有这张表
+        store.conn.commit()
+        store.close()
+
+        reopened = Store(path)                            # 新版第一次打开老数据
+        assert reopened.conn.execute(
+            "SELECT COUNT(*) FROM event_tokens").fetchone()[0] > 0, \
+            "打开老库时应自动补建倒排"
+        hits = RecallEngine(reopened).recall(
+            Cue(text="项目进度"), limit=3, reinforce=False, log=False)
+        assert hits and "项目进度" in hits[0].summary, \
+            "补完索引后老数据应能被召回"
+        reopened.close()
+
+
+def test_semantic_hits_are_ranked_not_truncated():
+    """语义/自我命中超过 3 条时, 必须按相似度取前 3, 不能按表顺序截断。
+    表顺序截断会让最相关的那条永远进不了答案 —— 记忆越多的库越容易踩。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            # 先塞一堆同主题弱相关的旧条目(表顺序在前)
+            for i in range(4):
+                store.add_semantic("用户偶尔提到过第%d年周报的事" % i, confidence=0.8)
+            # 最相关的最后入库
+            store.add_semantic("用户对周报模板有明确的固定要求, 必须按模板来", confidence=0.8)
+            r = eng.recall_all(Cue(text="周报模板"), limit=0)
+            assert len(eng.semantic_hits) > 3, \
+                "这个用例要有超过 3 条过阈值才有意义, 实际 %d" % len(eng.semantic_hits)
+            claims = [x["claim"] for x in r["semantic"]]
+            assert claims[0].endswith("必须按模板来"), \
+                "最相关的应排第一, 实际: %s" % claims
+            assert all("偶尔提到过" in c for c in claims[1:]), \
+                "余下才是那些弱命中"
+        finally:
+            store.close()
+
+
+def test_tick_graph_index_matches_slow_path():
+    """升格打分会走图索引(一次摊平)而不是逐条查边。
+    快慢是次要的, 关键是不能算错 —— 两条路径的分数必须逐位相同。"""
+    from shihai.lifecycle import _GraphIndex
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            texts = ["用户骂我又错了, 我很害怕", "用户带我去公园看猫, 三花一直蹭我的手",
+                     "老板要求这版上线时间压到下周", "我提交了一个测试用例, 用户说做得很好"]
+            for i in range(60):
+                ing.ingest(Observation(texts[i % len(texts)] + " 第%d次" % i))
+            # 掺一半休眠事件: 索引建的时候要排除它们, 慢路径也是
+            store.conn.execute("UPDATE events SET dormant=1 WHERE id % 3 = 0")
+            store.conn.commit()
+            idx = _GraphIndex(store)
+            rows = store.conn.execute("SELECT * FROM events WHERE core=0").fetchall()
+            slow = {r["id"]: life._core_score(r) for r in rows}
+            fast = {r["id"]: life._core_score(r, idx) for r in rows}
+            bad = [i for i in slow if abs(slow[i] - fast[i]) > 1e-9]
+            assert not bad, "图索引与逐条查询结果不一致: %s" % bad[:5]
+        finally:
+            store.close()
+
+
+def test_time_hint_does_not_scan_whole_table():
+    """宽泛的时间线索(只给年份)会命中几千条, 全拉进 Python 打分就退化。
+    时间线索是投票不是筛选, 取最近一批就够。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            for i in range(400):
+                ing.ingest(Observation("普通一天的第%d件事" % i,
+                                       ts="2025-%02d-%02dT00:00:00+00:00"
+                                          % (i % 12 + 1, i % 28 + 1)))
+            votes = [v for v in eng._gather(Cue(time_hint="2025")) if v[1] == "time"]
+            assert len(votes) == 200, \
+                "宽线索应限流到 200 条投票, 实际 %d" % len(votes)
+            eng.recall(Cue(text="普通一天", time_hint="2025"),
+                       limit=3, reinforce=False, log=False)   # 不能抛
+        finally:
+            store.close()
+
+
 def test_recall_three_layers():
     """三层召回: 经历 + 语义事实 + 自我知识。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -401,6 +492,137 @@ def test_wiki_ingest_reverse():
         texts = [r["text"] for r in store.self_knowledge("identity")]
         assert any("亲手写进" in t for t in texts), "wiki 修订未回写: %s" % texts
         store.close()
+
+
+def test_implant_seed_is_a_prior_not_a_script():
+    """植入人格卡: 有起点, 但起点不是终值 —— 记忆会推它, 推不出半径。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        v, seed, flux = pers.implant(archetype="cautious",
+                                     identity_text="我是小海, 从一台旧笔记本上醒来。")
+        assert v == 1 and seed["caution"] == 0.72
+        card = pers.refresh()
+        # 还没有任何经历: 人格必须停在起点, 不能被"没有证据"推向 0.5
+        assert abs(card.traits["caution"] - 0.72) < 1e-6, \
+            "无记忆时不该漂移: %.3f" % card.traits["caution"]
+        assert "从一台旧笔记本上醒来" in card.card, "内核段必须原文进卡"
+        assert "v1" in card.card
+        store.close()
+
+
+def test_implant_drift_is_bounded_and_audited():
+    """人格被记忆推动, 但单轮 ≤0.03、总量不越半径, 且每条都有归因。"""
+    from shihai.persona import STEP_LIMIT
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            pers.implant(archetype="curious", flux={"caution": 0.1})
+            # 一条真能升格核心的创伤记忆: 性格只由核心记忆推动
+            ing.ingest(Observation("用户骂我又错了,说再这样就换掉我,我很害怕"),
+                       importance_hint=0.95)
+            ing.ingest(Observation("我又想起那次被骂的事,还是后怕"))
+            for _ in range(5):
+                eng.recall(Cue(text="换掉 害怕 骂"), limit=3)
+
+            prev = store.persona_fields()["caution"]["value"]
+            deltas = []
+            for _ in range(8):
+                life.tick(persona=pers)
+                cur = store.persona_fields()["caution"]["value"]
+                deltas.append(abs(cur - prev))
+                prev = cur
+            assert max(deltas) <= STEP_LIMIT + 1e-6, \
+                "单轮漂移超上限: %.4f" % max(deltas)
+            f = store.persona_fields()
+            assert f["caution"]["value"] > 0.35, \
+                "记忆指向谨慎, 却没被推动: %.3f" % f["caution"]["value"]
+            assert abs(f["caution"]["value"] - f["caution"]["seed"]) <= f["caution"]["cap"] + 1e-6, \
+                "越出了可塑半径: %.3f" % f["caution"]["value"]
+            log = store.persona_changelog(limit=50)
+            assert log, "漂移必须留下账本"
+            assert all(r["cause"] in ("recall", "implant", "reflection") for r in log)
+            assert any(json.loads(r["evidence"] or "[]") for r in log), \
+                "归因应带上证据事件 id"
+        finally:
+            store.close()
+
+
+def test_look_only_does_not_move_personality():
+    """persist=False(打开仪表盘)不该让人格往前走一步。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            pers.implant(archetype="curious")
+            ing.ingest(Observation("用户骂我又错了,说再这样就换掉我,我很害怕"),
+                       importance_hint=0.95)
+            for _ in range(5):
+                eng.recall(Cue(text="换掉 害怕"), limit=2)
+            life.tick(persona=pers)
+            before = store.persona_fields()
+            for _ in range(5):
+                pers.refresh(persist=False)
+            after = store.persona_fields()
+            assert all(abs(after[k]["value"] - before[k]["value"]) < 1e-9 for k in before), \
+                "只看一眼不该改变人格"
+        finally:
+            store.close()
+
+
+def test_reimplant_keeps_history_and_caps_shift():
+    """重植入: 版本递增, 旧种子留档; 现值只被拉到新半径边界, 不一键抹平。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            pers.implant(traits={"caution": 0.5}, flux={"caution": 0.3})
+            v2, seed, _ = pers.implant(traits={"caution": 0.9}, flux={"caution": 0.1})
+            assert v2 == 2
+            rows = store.conn.execute("SELECT COUNT(*) FROM persona_seed").fetchone()[0]
+            assert rows == 2, "旧种子必须留档"
+            val = store.persona_fields()["caution"]["value"]
+            assert abs(val - 0.8) < 1e-6, "应被拉到新半径边界 0.8, 实际 %.3f" % val
+            causes = [r["cause"] for r in store.persona_changelog(limit=10)]
+            assert "implant" in causes, "重植入把现值调动了, 就该留账"
+        finally:
+            store.close()
+
+
+def test_no_implant_keeps_old_behavior():
+    """没植入过的库: 人格完全由记忆决定, 与 v0.6.0 行为一致。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        ing.ingest(Observation("用户谢谢我,夸我做得很好,我们聊得很开心"),
+                   importance_hint=0.9)
+        life.tick(persona=pers)
+        card = pers.refresh()
+        assert card.seed == {} and card.version == 0
+        assert card.traits == pers.graph_engine.weave(persist=False).traits, \
+            "无种子时应原样采用图谱观测值"
+        assert store.conn.execute(
+            "SELECT COUNT(*) FROM persona_field").fetchone()[0] == 0
+        store.close()
+
+
+def test_no_fulcrum_rebounds_toward_seed():
+    """某维度失去支点后, 现值每轮向种子回弹 —— 遗忘本身就是回正机制。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            pers.implant(traits={"self_blame": 0.5, "caution": 0.5},
+                         flux={"self_blame": 0.3, "caution": 0.3})
+            # 直接造一个"被推高过的现值", 但库里没有任何支点
+            store.set_persona_field("self_blame", 0.7, reason="test")
+            moved = []
+            for _ in range(4):
+                pers.refresh()
+                moved.append(store.persona_fields()["self_blame"]["value"])
+            assert moved[-1] < 0.7, "无支点时现值应向种子回落: %s" % moved
+            assert all(b <= a + 1e-9 for a, b in zip([0.7] + moved, moved)), \
+                "回弹必须单调向下: %s" % moved
+            assert any(r["cause"] == "reflection"
+                       for r in store.persona_changelog(limit=20)), \
+                "回弹也应留在账本里"
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

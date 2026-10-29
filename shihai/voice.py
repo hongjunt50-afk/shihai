@@ -214,4 +214,9 @@ class VoiceEngine:
                  "健康度 %.2f —— 所以我%s。这不是设定, 是我经历到现在自然形成的腔调。"
                  % (profile.jung_dominant, profile.ennea_type, profile.ennea_wing,
                     profile.health, tone_parts[0]))
+        if not profile.jung_dominant and not profile.ennea_type:
+            # 空库: 没有类型可说。硬填「主导功能是 , 九型 0w0」比不说更糟 ——
+            # 那句没有信息量, 还会让 agent 以为自己已经有了稳定的性格。
+            intro = ("我还没有长出稳定的性格, 所以现在说话是平实的默认腔调。"
+                     "经历多了会自然变。")
         return tone, tempo, intro

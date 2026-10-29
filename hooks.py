@@ -47,8 +47,16 @@ def _render_context_block(r):
         lines.append(r["diary"])
     t = r["typology"]
     lines.append("")
-    lines.append("类型档案: 荣格主导 %s | 九型 %s | 健康度 %.2f(%s)"
-                 % (t["dominant"], t["ennea"], t["health"], t["drift"]))
+    if t.get("dominant") not in (None, "", "-") and t.get("ennea") not in (None, "", "-"):
+        lines.append("类型档案: 荣格主导 %s | 九型 %s | 健康度 %.2f(%s)"
+                     % (t["dominant"], t["ennea"], t["health"], t["drift"]))
+    else:
+        lines.append("类型档案: 还没形成(经历不够)")
+    if r.get("facts"):
+        lines.append("")
+        lines.append("## 我记得的事实")
+        for f in r["facts"]:
+            lines.append("- %s (置信 %.2f)" % (f["claim"], f["confidence"]))
     if r["recalled"]:
         lines.append("")
         lines.append("此刻想起来的:")
@@ -106,6 +114,13 @@ def main(argv=None):
     b.add_argument("--min", type=float, default=0.12)
 
     sm = sub.add_parser("selfmaint", help="维护自我知识库(衰减+回收)")
+
+    tk = sub.add_parser("task", help="任务: 列出 / 加 / 关闭")
+    tk.add_argument("action", choices=["list", "add", "close"], nargs="?", default="list")
+    tk.add_argument("--title")
+    tk.add_argument("--id", type=int)
+    tk.add_argument("--due")
+    tk.add_argument("--status", choices=["done", "abandoned"], default="done")
 
     d = sub.add_parser("diary", help="日记: 收日/查看/回忆/导出/导入")
     d.add_argument("action", choices=["close", "recent", "recall", "export", "import", "compose"],
@@ -191,6 +206,22 @@ def main(argv=None):
     elif a.cmd == "selfmaint":
         ok, r = svc.dispatch("selfmaint", {})
         print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
+        return 0
+    elif a.cmd == "task":
+        if a.action == "add" and not a.title:
+            print("--title 必须给"); return 1
+        if a.action == "close" and not (a.id or a.title):
+            print("--id 或 --title 必须给一个"); return 1
+        ok, r = svc.dispatch("task", {"action": a.action, "title": a.title,
+                                      "id": a.id, "due": a.due, "status": a.status})
+        if a.action == "list":
+            for t in r["tasks"]:
+                print("  #%d %s%s" % (t["id"], t["title"],
+                                      " (截止 %s)" % t["due"] if t["due"] else ""))
+            if not r["tasks"]:
+                print("  (没有未完成的任务)")
+        else:
+            print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
         return 0
     elif a.cmd == "diary":
         ok, r = svc.dispatch("diary", {"action": a.action, "day": a.day,

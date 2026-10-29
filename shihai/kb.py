@@ -93,11 +93,65 @@ def classify(text):
     if any(k in text for k in ("别叫", "要叫", "称呼", "说话", "口吻", "客套", "语气")):
         return "voice", "关于我怎么说话"
     if any(k in text for k in ("我习惯", "我要求", "以后", "总是", "不要用", "按照",
-                               "我做事", "我的风格", "我的原则", "我会先")):
+                               "我做事", "我的风格", "我的原则", "我会先",
+                               "我更喜欢", "我偏好", "我倾向", "我通常")):
         return "style", "关于我怎么行事"
     if any(k in text for k in ("那天", "第一次", "我们一起", "你答应", "你记得吗")):
         return "moment", "我们的点滴"
     return None, "未能判定为自我知识 → 共享知识库"
+
+
+# ---- 自动入口(2026-10-29) ------------------------------------------------
+#
+# 上面那个 classify 是给「人显式说 selflearn」用的, 判得松; 自动从会话里抽
+# 需要更严的门槛, 否则「这个项目以后统一用 duckdb」这类项目决策会混进
+# "我怎么行事" —— 那是世界知识, 该走共享知识库。
+#
+# 自动入口只认「对我下的指示」与「关于我自己的自述」两类信号:
+#   · 指示: 你别 / 以后别 / 别给我 / 说话 / 口吻 / 称呼 / 别再 / 要叫
+#   · 自述: 我叫 / 我是 / 我习惯 / 我在意 / 我更喜欢 / 我不喜欢…你
+# 且必须不含项目级名词(项目/系统/接口/代码/仓库/服务器/数据库/我们组)。
+_PROJECT_NOUNS = ("项目", "系统", "接口", "代码", "仓库", "服务器", "数据库",
+                  "部署", "上线", "字段", "表结构", "我们组")
+_AGENT_DIRECTIVE = ("你别", "以后别", "别再", "别给我", "不要用", "不要给",
+                    "说话", "口吻", "称呼", "要叫", "语气")
+_NOW_FIRST_PERSON = ("我叫", "我是", "我习惯", "我在意", "我在乎",
+                     "我更喜欢", "我偏好", "我倾向", "我讨厌", "我不喜欢")
+
+
+def auto_kind(text):
+    """会话里的自动判定: 这句话是不是「关于我自己」的长期指示?
+
+    返回 kind|None。比 classify 严 —— 宁可漏, 不要把它人的世界知识写进人格。
+    """
+    s = (text or "").strip()
+    if len(s) < 4:
+        return None
+    if any(n in s for n in _PROJECT_NOUNS):
+        return None
+    if not (any(d in s for d in _AGENT_DIRECTIVE) or any(p in s for p in _NOW_FIRST_PERSON)):
+        return None
+    return classify(s)[0]
+
+
+# 用户对我说的话, 入自我知识库时要改写成第一人称 —— 「你以后别用客套话」
+# 存成「我以后别用客套话」, 否则投影里 agent 读到的是一句别人对它说的话,
+# 不是它自己的规矩。
+_YOU_PREFIX = re.compile(r"^(?:用户|你|助手)?\s*[:：]?\s*(?:以后|之后)?\s*")
+_YOU_TO_I = (("你别", "我别"), ("你以后", "我以后"), ("你不要", "我不要"),
+             ("你说话", "我说话"), ("你回答", "我回答"), ("你要叫", "我要叫"))
+
+
+def as_first_person(text):
+    s = (text or "").strip().rstrip("。！!")
+    for a, b in _YOU_TO_I:
+        if a in s:
+            s = s.replace(a, b, 1)
+            break
+    else:
+        s = _YOU_PREFIX.sub("", s) if s.startswith(("用户", "你", "助手")) else s
+    return s.strip()
+
 
 
 class SelfKB:

@@ -15,26 +15,48 @@ import json
 import os
 
 # 识海的家。环境变量可覆盖(测试/多实例用), 默认 ~/.shihai。
-SHIHAI_HOME = os.environ.get("SHIHAI_HOME", os.path.join(os.path.expanduser("~"), ".shihai"))
+#
+# 2026-10-29 改成惰性解析。旧版在模块导入时就把路径算成常量, 于是
+# `os.environ["SHIHAI_HOME"] = tmp` 在导入之后再设完全无效 —— 测试、
+# 临时实例、多 agent 全部静默写到真实库(~/.shihai)。实测代价: 冒烟测试与
+# 单元测试往用户的记忆本体里塞了假事件, 还把一条 voice 的稳固度顶上去了。
+# 现在每次取路径都重新读环境变量, 下面四个名字保持可用(模块级 __getattr__)。
 
-DB_PATH = os.path.join(SHIHAI_HOME, "shihai.db")          # 识海库本体
-TYPOLOGY_PATH = os.path.join(SHIHAI_HOME, "typology.json") # 性格类型连续状态
-FREEMODE_PATH = os.path.join(SHIHAI_HOME, "freemode.json") # 自由模式运行态
-SERVER_PORT_FILE = os.path.join(SHIHAI_HOME, "server.port")
+_DEFAULT_HOME = os.path.join(os.path.expanduser("~"), ".shihai")
+
+_FILES = {
+    "DB_PATH": "shihai.db",              # 识海库本体
+    "TYPOLOGY_PATH": "typology.json",    # 性格类型连续状态
+    "FREEMODE_PATH": "freemode.json",    # 自由模式运行态
+    "SERVER_PORT_FILE": "server.port",
+}
+
+
+def home():
+    return os.environ.get("SHIHAI_HOME") or _DEFAULT_HOME
+
+
+def __getattr__(name):
+    """让 H.SHIHAI_HOME / H.DB_PATH 这类旧写法仍然可用, 但每次现算。"""
+    if name == "SHIHAI_HOME":
+        return home()
+    if name in _FILES:
+        return os.path.join(home(), _FILES[name])
+    raise AttributeError(name)
 
 
 def ensure_home():
-    os.makedirs(SHIHAI_HOME, exist_ok=True)
-    return SHIHAI_HOME
+    os.makedirs(home(), exist_ok=True)
+    return home()
 
 
 def is_initialized():
-    return os.path.exists(DB_PATH)
+    return os.path.exists(os.path.join(home(), _FILES["DB_PATH"]))
 
 
 def identity_card():
     """识海的身份信息(首启时写入, 之后只读)。"""
-    path = os.path.join(SHIHAI_HOME, "identity.json")
+    path = os.path.join(home(), "identity.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)

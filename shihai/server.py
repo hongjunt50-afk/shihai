@@ -78,6 +78,7 @@ class ShihaiService:
         return {"event_id": ev.event_id,
                 "nodes": [(n["kind"], n["label"]) for n in ev.nodes],
                 "task": ev.task,
+                "selfkb": [{"kind": k, "text": t} for k, t in ev.selfkb],
                 "semantic": [s[0] if isinstance(s, tuple) else s for s in ev.semantic]}
 
     def h_ask(self, a):
@@ -114,31 +115,33 @@ class ShihaiService:
         return out
 
     def h_context(self, a):
-        """投影: 给记忆文档用的注入块。这是识海对 agent 的唯一日常输出。"""
-        snap = self.store.last_persona()
-        if snap is None:
-            refreshed = self.persona.refresh()
-            card, voice = refreshed.card, refreshed.voice
-        else:
-            card = snap["card"]
-            # voice 与快照同源: 用快照当天的 typology 状态文件(与快照同期生成)
-            voice = self.persona.voice_engine.build(
-                self.typology.infer(persist=True),
-                json.loads(snap["traits"])).render()
+        """投影: 给记忆文档用的注入块。这是识海对 agent 的唯一日常输出。
+
+        卡面、说话方式、类型档案必须出自**同一次**计算。旧版卡面取
+        `last_persona()` 的旧快照、voice 与 typology 却现算, 于是注入块里
+        会出现「健康度 0.00, 正在解离」紧接着「健康度 0.39, 平稳」——
+        同一个我, 两个数字, 自己跟自己打架。现在统一走 persist=False
+        的只读刷新: 看投影不该推进人格, 但看到的三段必须自洽。
+        """
+        seen = self.persona.refresh(persist=False)
         hits = self.recall.recall(
             Cue(text=a.get("query", "")), limit=int(a.get("limit", 4)))
         tasks = self.store.open_tasks()
-        profile = self.typology.infer(persist=True)
         boot = self.kb.bootstrap()
+        t = seen.typology
         return {
-            "persona": card,
-            "voice": voice,
+            "persona": seen.card,
+            "voice": seen.voice,
             "selfkb": boot.block,
             "diary": self.diary.bootstrap_block(n=2),
-            "typology": {"dominant": profile.jung_dominant,
-                         "ennea": "%dw%d" % (profile.ennea_type, profile.ennea_wing),
-                         "health": profile.health, "drift": profile.drift_direction},
+            "typology": {"dominant": t.get("jung_dominant") or "-",
+                         "ennea": ("%dw%d" % (t["ennea_type"], t["ennea_wing"])
+                                   if t.get("ennea_type") else "-"),
+                         "health": t.get("health", 0.5),
+                         "drift": t.get("drift_direction") or "unknown"},
             "recalled": [{"core": h.core, "summary": h.summary} for h in hits],
+            "facts": [{"claim": f["claim"], "confidence": round(f["confidence"], 2)}
+                      for f in self.store.facts()],
             "tasks": [{"title": t["title"], "due": t["due"]} for t in tasks],
             "freemode": self.freemode.state.active,
         }
@@ -321,11 +324,29 @@ class ShihaiService:
                              typology_engine=self.typology)
         return {"path": p, "bytes": size}
 
+    def h_task(self, a):
+        """任务读写。以前只有 add 没有 close, 投影里「还欠着的」只增不减。
+
+        action: list / add / close
+        """
+        action = a.get("action", "list")
+        if action == "add":
+            tid = self.store.add_task(a.get("title", ""), due=a.get("due"))
+            return {"id": tid, "title": a.get("title", "")}
+        if action == "close":
+            if a.get("id"):
+                row = self.store.close_task(int(a["id"]), a.get("status", "done"))
+                return {"closed": 1 if row else 0, "task": dict(row) if row else None}
+            n = self.store.close_task_by_title(a.get("title", ""), a.get("status", "done"))
+            return {"closed": n, "title": a.get("title", "")}
+        return {"tasks": [{"id": t["id"], "title": t["title"], "due": t["due"],
+                           "created": t["created"]} for t in self.store.open_tasks()]}
+
     HANDLERS = {
         "tell": h_tell, "ask": h_ask, "tick": h_tick, "context": h_context,
         "persona": h_persona, "implant": h_implant, "archetypes": h_archetypes,
         "drift": h_drift,
-        "freemode": h_freemode, "stats": h_stats,
+        "freemode": h_freemode, "stats": h_stats, "task": h_task,
         "selflearn": h_selflearn, "selfkb": h_selfkb, "selfconfirm": h_selfconfirm,
         "bootstrap": h_bootstrap, "selfmaint": h_selfmaint,
         "diary": h_diary, "warmth": h_warmth, "wiki": h_wiki,

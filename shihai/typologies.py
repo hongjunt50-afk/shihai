@@ -283,9 +283,15 @@ class TypologyEngine:
                 neg_sum += abs(float(row["valence"])) * float(row["arousal"])
 
         # 归一化
-        total = sum(jung_acc.values()) or 1.0
+        total = sum(jung_acc.values()) or 0.0
+        etotal = sum(ennea_acc.values()) or 0.0
+        if total <= 0 or etotal <= 0:
+            # 库里还没有任何经历 → 没有类型可言。旧版这里 total=1.0 兜底,
+            # 于是空库也会凭 dict 顺序吐出一个"我是 2w1, 健康度 0.00,
+            # 正在解离"的完整人格 —— 那不是长出来的, 是编的。
+            return TypologyProfile(health=0.5, drift_direction="unknown",
+                                   drift_note="还没有足够的经历, 类型尚未形成")
         jung_n = {k: round(v / total, 4) for k, v in jung_acc.items()}
-        etotal = sum(ennea_acc.values()) or 1.0
         ennea_n = {k: round(v / etotal, 4) for k, v in ennea_acc.items()}
 
         # 与上次值混合(learn 公式) —— 类型不因单条记忆翻转

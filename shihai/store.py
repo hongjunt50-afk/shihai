@@ -274,10 +274,19 @@ def _claim_similar(a, b, threshold=0.55):
 
 
 def _claim_conflict(a, b):
-    """矛盾检测基线: 同主体且断言被否定词翻转("喜欢"vs"不喜欢", "用"vs"不用")。"""
+    """矛盾检测基线: 同主体且断言被否定词翻转("喜欢"vs"不喜欢", "用"vs"不用")。
+
+    2026-10-29 补了人事/职责类翻转对 —— 原来只有偏好类, 于是
+    「我负责支付模块」→「我现在不负责支付模块了」、「我的老板是张三」→
+    「我的老板换成李四了」这两类改口都检测不出来, 旧事实被永久保留。
+    """
     if not _claim_similar(a, b, 0.4):
         return False
-    flips = [("喜欢", "不喜欢"), ("用", "不用"), ("是", "不是"), ("会", "不会"), ("要", "不要")]
+    flips = [
+        ("喜欢", "不喜欢"), ("用", "不用"), ("是", "不是"), ("会", "不会"), ("要", "不要"),
+        ("负责", "不负责"), ("负责", "改由"), ("是", "换成"), ("是", "改由"),
+        ("在", "不在"), ("有", "没有"),
+    ]
     for pos, neg in flips:
         if ((pos in a and neg in b) or (neg in a and pos in b)):
             return True
@@ -371,6 +380,20 @@ class Store:
         return cur.lastrowid
 
     def add_edge(self, src, dst, rel, weight=1.0, note=None):
+        """加一条边。同 (src, dst, rel) 已存在就只加重权重 —— 幂等。
+
+        旧版每次都插一行, 于是一条经历里重复出现 30 次「用户说…」就长出
+        30 条一模一样的 involved 边(实测: 31 条边里只有 2 条不同的)。
+        边是图结构, 重复边不携带信息, 只让所有按边遍历的地方变成 O(重复数)。
+        """
+        row = self.conn.execute(
+            "SELECT id, weight FROM edges WHERE src=? AND dst=? AND rel=?",
+            (src, dst, rel)).fetchone()
+        if row:
+            self.conn.execute("UPDATE edges SET weight=weight+? WHERE id=?",
+                              (weight, row["id"]))
+            self.conn.commit()
+            return row["id"]
         cur = self.conn.execute(
             "INSERT INTO edges(src, dst, rel, weight, note, created) VALUES (?,?,?,?,?,?)",
             (src, dst, rel, weight, note, utcnow()),
@@ -419,9 +442,17 @@ class Store:
         """mem0 式冲突决策: 新事实进语义层前, 先与既有事实对质。
         决策四值(借鉴 mem0 的 ADD/UPDATE/DELETE/NONE):
             ADD      —— 没有近似旧事实, 直接入库
-            UPDATE   —— 新事实与旧事实矛盾且新事实置信更高, 覆盖(旧值留 history)
-            NOOP     —— 近似重复, 只涨 hits
-            SUPERSEDE—— 旧事实被显式否定("不再/换了/取消"), 降权但不删
+            UPDATE   ���— 新事实与旧事实高度相似, 合并计数(hits)
+            NOOP     —— 完全一样的断言, 只涨 hits
+            SUPERSEDE—— 旧事实被显式否定或被新断言推翻, 降权保留(不删, 可回溯)
+
+        2026-10-29 修的两个坑(都会让"用户改口"反而加固旧事实):
+          1. 近似重复判定原先排在矛盾判定**前面**, 而「我不喜欢喝咖啡了」与
+             「我喜欢喝咖啡」的二字组重叠是 1.00, 于是它走了 NOOP, 旧事实
+             置信度从 0.7 涨到 0.75 —— 用户明确改口, 系统当成"又确认了一次"。
+             现在矛盾判定先跑, 且矛盾的旧事实一律降权。
+          2. 显式否定词表原本只有「不再/不是了/换了/取消/改用/以后不用」,
+             「我不喜欢…了」「换成」「不负责」「调走」全不在内。补齐。
         返回 (semantic_id, action)。
         """
         now = utcnow()
@@ -435,15 +466,28 @@ class Store:
             self.conn.commit()
             return row["id"], "NOOP"
 
-        # 2) 显式否定 → 降权旧事实
-        negations = ("不再", "不是了", "换了", "取消", "改用", "以后不用")
-        if any(n in claim for n in negations):
-            for old in self.conn.execute("SELECT * FROM semantic").fetchall():
-                if _claim_similar(old["claim"], claim):
-                    self.conn.execute(
-                        "UPDATE semantic SET confidence=MAX(0.1, confidence-0.4), updated=? WHERE id=?",
-                        (now, old["id"]),
-                    )
+        olds = self.conn.execute("SELECT * FROM semantic").fetchall()
+        # 2) 改口判定: 矛盾(含人事/职责/归属翻转) 或 显式否定词 + 相似。
+        #    必须排在近似重复之前, 否则改口会被当成"确认"。
+        negations = ("不再", "不是了", "换了", "换成", "改成", "改用", "取消",
+                     "以后不用", "不负责", "调走", "离职", "现在不", "不喜欢", "不再需要")
+        explicit = any(n in claim for n in negations)
+        superseded = []
+        for old in olds:
+            if _claim_conflict(old["claim"], claim):
+                superseded.append(old)
+            # 显式否定词的相似门槛比「近似重复」低(0.28 vs 0.55):
+            # 「我们用mysql做存储」→「我们改用duckdb做存储」重叠只有 0.30,
+            # 但确实是同一件事的改口。0.28 仍挡住了「我喜欢喝咖啡」→
+            # 「我不喜欢香菜」(0.20, 是两条独立偏好而非改口)。
+            elif explicit and _claim_similar(old["claim"], claim, 0.28):
+                superseded.append(old)
+        if superseded:
+            for old in superseded:
+                self.conn.execute(
+                    "UPDATE semantic SET confidence=MAX(0.1, confidence-0.4), updated=? WHERE id=?",
+                    (now, old["id"]),
+                )
             cur = self.conn.execute(
                 "INSERT INTO semantic(claim, subject, confidence, sources, created, updated) VALUES (?,?,?,?,?,?)",
                 (claim, subject, confidence, json.dumps(sources or []), now, now),
@@ -451,8 +495,8 @@ class Store:
             self.conn.commit()
             return cur.lastrowid, "SUPERSEDE"
 
-        # 3) 近似重复 → NOOP + hits 合并
-        for old in self.conn.execute("SELECT * FROM semantic").fetchall():
+        # 3) 近似重复(同义改写, 无否定) → 合并 hits
+        for old in olds:
             if _claim_similar(old["claim"], claim):
                 self.conn.execute(
                     "UPDATE semantic SET hits=hits+1, confidence=?, sources=?, updated=? WHERE id=?",
@@ -460,19 +504,6 @@ class Store:
                 )
                 self.conn.commit()
                 return old["id"], "NOOP"
-
-        # 4) 矛盾冲突(同主体+反向断言) → 置信高者胜
-        for old in self.conn.execute("SELECT * FROM semantic WHERE subject IS ?", (subject,)).fetchall():
-            if _claim_conflict(old["claim"], claim):
-                if confidence >= old["confidence"]:
-                    self.conn.execute(
-                        "UPDATE semantic SET claim=?, confidence=?, sources=?, updated=? WHERE id=?",
-                        (claim, confidence, json.dumps(sources or []), now, old["id"]),
-                    )
-                    self.conn.commit()
-                    return old["id"], "UPDATE"
-                # 旧事实置信更高: 新事实以低置信并存, 等更多证据
-                confidence = max(0.3, confidence * 0.5)
 
         cur = self.conn.execute(
             "INSERT INTO semantic(claim, subject, confidence, sources, created, updated) VALUES (?,?,?,?,?,?)",
@@ -501,13 +532,42 @@ class Store:
 
     # -- 任务 -----------------------------------------------------------
     def add_task(self, title, due=None, event_id=None, node_id=None):
+        """新建任务。同标题的 open 任务已存在时不重复建 —— 一天里几十条
+        经历反复提到同一件事, 否则「还欠着的」会堆出几十行一样的。"""
         now = utcnow()
+        row = self.conn.execute(
+            "SELECT * FROM task WHERE title=? AND status='open'", (title,)).fetchone()
+        if row:
+            # 已有: 只补 due(后来才提到截止日)与来源事件
+            if due and not row["due"]:
+                self.conn.execute("UPDATE task SET due=?, updated=? WHERE id=?",
+                                  (due, now, row["id"]))
+                self.conn.commit()
+            return row["id"]
         cur = self.conn.execute(
             "INSERT INTO task(title, due, event_id, node_id, created, updated) VALUES (?,?,?,?,?,?)",
             (title, due, event_id, node_id, now, now),
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def close_task(self, task_id, status="done"):
+        """关闭任务。任务表从 2026-10-18 起就没有关闭路径, 于是投影里
+        「还欠着的」只增不减 —— 做完的事永远挂在待办里。"""
+        if status not in ("done", "abandoned"):
+            status = "done"
+        self.conn.execute("UPDATE task SET status=?, progress=?, updated=? WHERE id=?",
+                          (status, 1.0 if status == "done" else 0.0, utcnow(), task_id))
+        self.conn.commit()
+        return self.conn.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
+
+    def close_task_by_title(self, title, status="done"):
+        """按标题关闭(CLI 与自动收尾用, 不必先查 id)。返回受影响条数。"""
+        rows = self.conn.execute(
+            "SELECT id FROM task WHERE title=? AND status='open'", (title,)).fetchall()
+        for r in rows:
+            self.close_task(r["id"], status)
+        return len(rows)
 
     def open_tasks(self):
         return self.conn.execute(
@@ -608,6 +668,17 @@ class Store:
         q += " ORDER BY plasticity DESC, uses DESC LIMIT ?"
         args.append(limit)
         return self.conn.execute(q, args).fetchall()
+
+    def facts(self, min_confidence=0.5, limit=6):
+        """投影用的语义事实: 只要还被信任的, 新鲜优先。
+
+        置信度低于 min_confidence 的(被改口降权到 0.1~0.3 的旧断言)不进投影 ——
+        用户改了主意之后, 旧的不能再当作"现在的事实"讲出来。
+        """
+        return self.conn.execute(
+            "SELECT * FROM semantic WHERE confidence>=? "
+            "ORDER BY confidence DESC, updated DESC LIMIT ?",
+            (min_confidence, limit)).fetchall()
 
     # -- 检索索引 -------------------------------------------------------
     def index_tokens(self, event_id, summary):

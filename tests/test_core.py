@@ -262,13 +262,23 @@ def test_context_projects_selfkb():
     import os as _os
     from shihai.server import ShihaiService
     with tempfile.TemporaryDirectory() as tmp:
+        old = _os.environ.get("SHIHAI_HOME")
         _os.environ["SHIHAI_HOME"] = tmp
-        svc = ShihaiService(agent_name="投影测试")
-        svc.dispatch("selflearn", {"text": "我叫小海", "kind": "identity"})
-        ok, r = svc.dispatch("context", {})
-        assert "selfkb" in r, "context 缺 selfkb 字段"
-        assert "小海" in r["selfkb"], "自我知识未进入投影"
-        svc.store.close()
+        svc = None
+        try:
+            svc = ShihaiService(agent_name="投影测试")
+            svc.dispatch("selflearn", {"text": "我叫小海", "kind": "identity"})
+            ok, r = svc.dispatch("context", {})
+            assert "selfkb" in r, "context 缺 selfkb 字段"
+            assert "小海" in r["selfkb"], "自我知识未进入投影"
+        finally:
+            if svc is not None:
+                svc.store.close()
+            # 必须还原: SHIHAI_HOME 现在是惰性读取的, 不还原会污染后面的用例
+            if old is None:
+                _os.environ.pop("SHIHAI_HOME", None)
+            else:
+                _os.environ["SHIHAI_HOME"] = old
 
 
 def test_voice_reads_self_knowledge():
@@ -650,6 +660,241 @@ def test_no_fulcrum_rebounds_toward_seed():
                 "回弹也应留在账本里"
         finally:
             store.close()
+
+
+# ---- 2026-10-29 二轮: 语义层/自我知识自动入口/任务/边/投影自洽 -------------
+
+def test_semantic_revision_supersedes_old_fact():
+    """用户改口必须降权旧事实, 不能当成"又确认了一次"。
+
+    旧版近似重复判定排在矛盾判定前面, 而「我不喜欢喝咖啡了」与
+    「我喜欢喝咖啡」二字组重叠是 1.00 → 走 NOOP 并且给旧事实 +0.05 置信度。
+    用户明确改口, 系统反而加固了过期事实。
+    """
+    s = Store(":memory:")
+    try:
+        s.resolve_semantic("我喜欢喝咖啡", confidence=0.7, sources=[1])
+        sid, act = s.resolve_semantic("我不喜欢喝咖啡了", confidence=0.7, sources=[2])
+        assert act == "SUPERSEDE", "改口应判 SUPERSEDE, 实际 %s" % act
+        old = s.conn.execute("SELECT confidence FROM semantic WHERE claim='我喜欢喝咖啡'").fetchone()
+        assert old["confidence"] <= 0.35, "旧事实应被降权, 实际 %.2f" % old["confidence"]
+        now = s.conn.execute("SELECT confidence FROM semantic WHERE claim='我不喜欢喝咖啡了'").fetchone()
+        assert now["confidence"] >= 0.6, "新事实应保持高置信"
+    finally:
+        s.close()
+
+
+def test_semantic_personnel_change_supersedes():
+    """人事/职责变更走同一条改口通道。旧版连检测都不成立(翻转对只有偏好类)。"""
+    s = Store(":memory:")
+    try:
+        s.resolve_semantic("我的老板是张三", confidence=0.7, sources=[1])
+        _, act = s.resolve_semantic("我的老板换成李四了", confidence=0.7, sources=[2])
+        assert act == "SUPERSEDE", "职位变更应判 SUPERSEDE, 实际 %s" % act
+        s.resolve_semantic("我负责支付模块的联调", confidence=0.7, sources=[3])
+        _, act2 = s.resolve_semantic("我现在不负责支付模块了", confidence=0.7, sources=[4])
+        assert act2 == "SUPERSEDE", "职责变更应判 SUPERSEDE, 实际 %s" % act2
+    finally:
+        s.close()
+
+
+def test_semantic_independent_facts_not_merged():
+    """独立的两条事实不能被误判成改口。"""
+    s = Store(":memory:")
+    try:
+        s.resolve_semantic("我喜欢喝咖啡", confidence=0.7)
+        _, act = s.resolve_semantic("我不喜欢香菜", confidence=0.7)
+        assert act == "ADD", "不同偏好应是 ADD, 实际 %s" % act
+        _, act2 = s.resolve_semantic("我负责用户模块", confidence=0.7)
+        assert act2 == "ADD", "不同职责应是 ADD, 实际 %s" % act2
+    finally:
+        s.close()
+
+
+def test_auto_self_knowledge_from_session():
+    """会话里的长期指示自动进自我知识库 —— 这是「切会话不忘」的真入口。
+
+    在此之前 self_knowledge 只有人手动 selflearn 一个写点, 用户在对话里说的
+    「以后别给我写总结」永远只是情景记忆, 下次开新会话想不起来。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            ev = ing.ingest(Observation(
+                "用户：以后别给我写总结段落, 直接说结论就行。\n"
+                "用户：这个项目以后统一用 duckdb。\n", modality="self"), importance_hint=0.6)
+            texts = [t for _k, t in ev.selfkb]
+            assert any("直接说结论" in t for t in texts), "长期指示应自动入自我知识库: %s" % texts
+            assert not any("duckdb" in t for t in texts), "项目级决策不该进人格"
+            rows = store.self_knowledge()
+            assert rows, "自我知识库应非空"
+            # 同一句不该同时进语义层与自我知识库
+            claims = [r["claim"] for r in store.conn.execute("SELECT claim FROM semantic")]
+            assert not any("直接说结论" in c for c in claims), "两边都存会漂移: %s" % claims
+        finally:
+            store.close()
+
+
+def test_auto_self_knowledge_rewrites_to_first_person():
+    """用户对 agent 说的话, 入库要改写成第一人称, 否则投影里读到的是别人说的话。"""
+    from shihai.kb import as_first_person
+    assert "你" not in as_first_person("你以后别用客套话")
+    assert as_first_person("你以后别用客套话").startswith("我")
+
+
+def test_edge_is_idempotent():
+    """同 (src,dst,rel) 只留一条边。旧版 31 条边里只有 2 条是不同的。"""
+    s = Store(":memory:")
+    try:
+        for _ in range(5):
+            s.add_edge("event:1", "node:2", "involved")
+        n = s.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        assert n == 1, "重复边应合并成一条, 实际 %d" % n
+        w = s.conn.execute("SELECT weight FROM edges").fetchone()["weight"]
+        assert w == 5.0, "重复加边应累加权重, 实际 %.1f" % w
+    finally:
+        s.close()
+
+
+def test_task_close_and_dedup():
+    """任务能关、同标题不重复建。旧版只有 add 和 open_tasks, 投影里只增不减。"""
+    s = Store(":memory:")
+    try:
+        id1 = s.add_task("回归测试")
+        id2 = s.add_task("回归测试")
+        assert id1 == id2, "同标题 open 任务应复用"
+        assert len(s.open_tasks()) == 1
+        s.close_task(id1)
+        assert not s.open_tasks(), "关闭后不该再出现在未完成列表"
+        assert s.close_task_by_title("不存在的任务") == 0
+    finally:
+        s.close()
+
+
+def test_task_extraction_requires_intent():
+    """完成时态不是待办。旧版实录攒了「转换/成了/并且可用/一遍」五条僵尸任务。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            ev = ing.ingest(Observation("把识海做成了 DSH 插件, 已经装好了。"))
+            assert ev.task == "", "完成时态不该抽成待办, 实际 %r" % ev.task
+            # 「完成」本身是动作词, 但「已经完成」是结果陈述 —— 缺意图词就不该抽
+            ev2 = ing.ingest(Observation("已经完成回归测试了。"))
+            assert ev2.task == "", "结果陈述不该抽成待办, 实际 %r" % ev2.task
+            ev3 = ing.ingest(Observation("我需要完成回归测试。"))
+            assert "回归测试" in ev3.task, "真待办应被抽出, 实际 %r" % ev3.task
+        finally:
+            store.close()
+
+
+def test_person_extraction_rejects_adjectives():
+    """人名抽取不能把「直接说结论」里的副词、「结论说：」里的名词当人名。
+
+    两层防护都要测: 正则层挡住「说结论」(动词后不跟"我"),
+    _NOT_NAME 层挡住「结论说我」这种形似人名的常用词。
+    """
+    from shihai.ingest import _PERSON, _NOT_NAME
+    for text, expect in [
+        ("最大的问题是我没先确认", []),
+        ("直接说结论就行", []),
+        ("这个区别很关键", []),
+        ("张三提醒我上线前要回归", ["张三"]),
+    ]:
+        got = [m.group(1) or m.group(2) or m.group(3) for m in _PERSON.finditer(text)]
+        assert got == expect, "%r 抽出 %s, 期望 %s" % (text, got, expect)
+    assert "结论" in _NOT_NAME and "最大" in _NOT_NAME, "_NOT_NAME 应含常用词"
+    assert "张三" not in _NOT_NAME
+
+    # 正则能过、但靠 _NOT_NAME 拦下的那一类: 必须真的不进图
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            ev = ing.ingest(Observation("结论说我明天再改一版方案。"))
+            persons = [n["label"] for n in ev.nodes if n["kind"] == "person"]
+            assert persons == [], "「结论说我…」不该长出 person 节点: %s" % persons
+        finally:
+            store.close()
+
+
+def test_empty_db_does_not_invent_personality():
+    """空库不能编出人格。旧版凭 dict 顺序吐出「我是 2w1, 健康度 0.00, 正在解离」。"""
+    import os as _os
+    from shihai.server import ShihaiService
+    with tempfile.TemporaryDirectory() as tmp:
+        old = _os.environ.get("SHIHAI_HOME")
+        _os.environ["SHIHAI_HOME"] = tmp
+        svc = None
+        try:
+            svc = ShihaiService(agent_name="空库")
+            ok, c = svc.dispatch("context", {})
+            assert c["typology"]["dominant"] == "-", "空库不该有主导功能"
+            assert c["typology"]["drift"] == "unknown"
+            assert "解离" not in c["persona"], "空库不该宣称正在解离: %s" % c["persona"]
+            assert "0w0" not in c["voice"], "空库说话方式不该填 0w0: %s" % c["voice"]
+            assert "还没" in c["persona"], "空库应明说类型尚未形成"
+        finally:
+            if svc is not None:
+                svc.store.close()
+            if old is None:
+                _os.environ.pop("SHIHAI_HOME", None)
+            else:
+                _os.environ["SHIHAI_HOME"] = old
+
+
+def test_context_health_is_self_consistent():
+    """投影里的健康度只能有一个值。旧版卡片取旧快照、voice 现算, 同一段话两个数字。"""
+    import os as _os
+    import re as _re
+    from shihai.server import ShihaiService
+    with tempfile.TemporaryDirectory() as tmp:
+        old = _os.environ.get("SHIHAI_HOME")
+        _os.environ["SHIHAI_HOME"] = tmp
+        svc = None
+        try:
+            svc = ShihaiService(agent_name="一致性")
+            for t in ("用户：这个报错又来了, 我很崩溃。", "用户：谢谢, 这次很好。"):
+                svc.dispatch("tell", {"text": t, "importance": 0.7})
+            ok, c = svc.dispatch("context", {})
+            found = _re.findall(r"健康度 ([\d.]+)", c["persona"]) + \
+                    _re.findall(r"健康度 ([\d.]+)", c["voice"])
+            assert found, "应当报告健康度"
+            assert len(set(found)) == 1, "同一份投影里健康度不应打架: %s" % found
+            # 文本里是两位小数, 与 typology.health 比要按同样精度
+            assert float(found[0]) == round(c["typology"]["health"], 2), \
+                "三段须同源: 文本 %s vs %s" % (found[0], c["typology"]["health"])
+        finally:
+            if svc is not None:
+                svc.store.close()
+            if old is None:
+                _os.environ.pop("SHIHAI_HOME", None)
+            else:
+                _os.environ["SHIHAI_HOME"] = old
+
+
+def test_context_projects_facts():
+    """语义层必须进投影 —— 否则抽对了事实也看不见, 只能靠 recall 现捞。"""
+    import os as _os
+    from shihai.server import ShihaiService
+    with tempfile.TemporaryDirectory() as tmp:
+        old = _os.environ.get("SHIHAI_HOME")
+        _os.environ["SHIHAI_HOME"] = tmp
+        try:
+            svc = ShihaiService(agent_name="事实")
+            svc.dispatch("tell", {"text": "我的老板是张三。", "importance": 0.6})
+            ok, c = svc.dispatch("context", {})
+            assert any("张三" in f["claim"] for f in c["facts"]), "语义事实应在投影里"
+            # 改口后旧事实被降权, 不该再出现在投影
+            svc.dispatch("tell", {"text": "我的老板换成李四了。", "importance": 0.6})
+            ok, c2 = svc.dispatch("context", {})
+            claims = [f["claim"] for f in c2["facts"]]
+            assert not any("我的老板是张三" in x for x in claims), \
+                "被改口的旧事实不该还当现在的事实讲: %s" % claims
+            svc.store.close()
+        finally:
+            if old is None:
+                _os.environ.pop("SHIHAI_HOME", None)
+            else:
+                _os.environ["SHIHAI_HOME"] = old
 
 
 if __name__ == "__main__":

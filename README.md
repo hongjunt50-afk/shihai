@@ -245,6 +245,33 @@ core_score ≥ 0.62 → 升格为核心记忆, 从此豁免衰减
 
 `recall_all()` 一次返回三层: **经历**(用于共情)、**语义事实**(用于回答)、**自我知识**(用于"我是怎样的人")。
 
+### 语义层怎么进投影, 旧事实怎么让位
+
+语义层是"用户是谁/在做什么"那层(偏好、人事归属、技术栈)。它以前**在投影里没有出口**
+—— 只有 `ask(all:true)` 才返回, 而日常注入走的是 `context`。于是抽对了事实也看不见,
+只能靠 agent 主动 recall 才捞得到。现在 `context` 多一个 `facts` 字段:
+按置信度排序, 只取 ≥0.5 的前 6 条, 三个渲染端(ZCode 钩子 / DSH 插件 / CLI)都同步注入。
+
+**改口必须能推翻旧事实**(2026-10-29 修)。`resolve_semantic` 原先的判定顺序把
+"近似重复"排在"矛盾"前面, 而「我不喜欢喝咖啡了」与「我喜欢喝咖啡」的二字组重叠是
+**1.00** —— 于是用户明确改口走了 NOOP, 还顺手把旧事实的置信度从 0.7 涨到 0.75。
+改成先判改口, 且补了人事/职责类翻转对:
+
+| 旧断言 | 新断言 | 判定 |
+|---|---|---|
+| 我喜欢喝咖啡 | 我不喜欢喝咖啡了 | SUPERSEDE(旧降到 0.3) |
+| 我的老板是张三 | 我的老板换成李四了 | SUPERSEDE |
+| 我负责支付模块 | 我现在不负责支付模块了 | SUPERSEDE |
+| 我们用 mysql 做存储 | 我们改用 duckdb 做存储 | SUPERSEDE |
+| 我喜欢喝咖啡 | 我不喜欢香菜 | ADD(两条独立偏好, 不是改口) |
+| 我负责支付模块 | 我负责用户模块 | ADD |
+
+同时 `ingest` 的语义抽取从"只截信号词后面 30 字"改成**整句入库**: 旧版把
+「张三调走了, 现在我的老板是李四」截成半句, 与「我的老板是张三」几乎不重叠,
+改口永远匹配不上。整句之后「我的老板」这个共同主干就能把两句连起来。
+入库前还要剥掉「用户：」「我：」这类说话人前缀 —— 不剥的话同一件事的两次陈述
+会因为前缀稀释而重叠不足。
+
 ---
 
 ## 性格类型学: 荣格 × 九型
@@ -507,6 +534,28 @@ python hooks.py tick                            # 会话中的纯固结: 不消�
 
 `moment`(我们的点滴)从权重 1.0 降到 0.5 —— 它不该比 `identity` 还脆。
 
+### 自动入口: 不用人手动教(2026-10-29)
+
+上面那套可塑性只有在**有东西进去**的时候才成立。在此之前 `self_knowledge` 只有一个写点
+—— 人显式调用 `selflearn`, 或 agent 主动调工具。用户在对话里说的「以后别给我写总结」
+「我更喜欢你先给结论」永远只是情景记忆: 下次开新会话想不起来, 得靠人再教一遍。
+这恰好是识海最该解决的场景, 却是唯一要人动手的环节。
+
+现在 `ingest` 会自动跑一道 `kb.auto_kind` 的门:
+
+| 收(进自我知识库) | 拒(留给共享知识库/情景记忆) |
+|---|---|
+| 「以后别给我写总结段落」「说话别绕弯子」 | 「这个项目以后统一用 duckdb」(项目决策) |
+| 「我更喜欢你先给结论」「我习惯先看数据」 | 「接口必须加鉴权」(工作规则) |
+| 「你以后别用客套话」→ 存成「我以后别用客套话」 | 「今天下午三点开了个会」(一次性事件) |
+
+门比 `classify` 严: 必须含**长期指示词**(你别/以后别/说话/称呼…)或**第一人称自述**
+(我叫/我习惯/我更喜欢…), 且不含「项目/系统/接口/数据库/我们组」这类项目级名词。
+宁可漏, 不把它人的世界知识写进人格。
+
+同一句话不会两边都存 —— 自我知识优先, 语义层跳过。两边各存一份的话, 用户改口时要改
+两处, 迟早漂移。
+
 
 ### 为什么它解决"上下文限制"
 
@@ -720,6 +769,10 @@ python hooks.py selflearn "..." [--kind identity|care|style|voice|moment]
 python hooks.py selfkb [--kind ...]
 python hooks.py selfmaint
 
+# 任务(「还欠着的」): 列 / 加 / 关
+python hooks.py task [--title "..." --due 明天]
+python hooks.py task close --title "..."        # 或 --id 3 --status abandoned
+
 # 日记
 python hooks.py diary close|recent|recall|compose|export|import
 python hooks.py warmth --add 3 --day 2026-10-21
@@ -753,7 +806,7 @@ python hooks.py freemode on|off|status|run [--cycles 3]
 | 宿主 | 文件 | 挂点 |
 |---|---|---|
 | **ZCode** | `zcode/hook.mjs` | `SessionStart` 注入投影(0.2s) + `Stop` 入库本题新增正文(真跑是 0.07s; 冷启动一次约 0.5s) |
-| **DSH** | `F:\AI\projects\dsh-shihai` | `system-prompt/assemble` 注入 + `session/event` 沉淀 + 四个工具 |
+| **DSH** | `F:\AI\projects\dsh-shihai` | `system-prompt/assemble` 注入 + `session/event` 沉淀 + 五个工具 |
 | **每日固结** | cron | `python hooks.py tick --days 1 --selfkb-days 1` |
 
 ZCode 侧的两个坑写在 `zcode/hook.mjs` 头部: `Stop` 绝不输出 `decision:block`(那是拦停语义,
@@ -847,7 +900,7 @@ warmth_ledger(id, day, delta, reason, created)
 python tests/test_core.py
 ```
 
-**32 条端到端回归**, 每个断言对应一个真实修过的坑:
+**44 条端到端回归**, 每个断言对应一个真实修过的坑:
 
 | 测试 | 守什么 |
 |---|---|
@@ -883,6 +936,18 @@ python tests/test_core.py
 | `test_tick_graph_index_matches_slow_path` | 图索引与逐条查询的升格分数逐位相同 |
 | `test_old_db_gets_index_backfilled` | 老库升级后自动补倒排, 文本召回不哑 |
 | `test_time_hint_does_not_scan_whole_table` | 宽时间线索限流到 200 条投票 |
+| `test_semantic_revision_supersedes_old_fact` | 用户改口降权旧事实, 不是"又确认了一次" |
+| `test_semantic_personnel_change_supersedes` | 换老板/不负责某块 → SUPERSEDE |
+| `test_semantic_independent_facts_not_merged` | 独立的两条事实不被误判成改口 |
+| `test_auto_self_knowledge_from_session` | 会话里的长期指示自动进自我知识库(切会话不忘的入口) |
+| `test_auto_self_knowledge_rewrites_to_first_person` | 「你别…」入库改成「我…」 |
+| `test_edge_is_idempotent` | 同 (src,dst,rel) 只留一条边, 重复加只涨权重 |
+| `test_task_close_and_dedup` | 任务能关, 同标题不重复建 |
+| `test_task_extraction_requires_intent` | 完成时态不抽成待办(杀掉僵尸任务) |
+| `test_person_extraction_rejects_adjectives` | 「直接说结论」「结论说我」不长 person 节点 |
+| `test_empty_db_does_not_invent_personality` | 空库不编「我是 2w1, 正在解离」 |
+| `test_context_health_is_self_consistent` | 投影里健康度只有一个值(卡面/voice/typology 同源) |
+| `test_context_projects_facts` | 语义层进投影, 且被改口的旧事实不再出现 |
 
 ---
 

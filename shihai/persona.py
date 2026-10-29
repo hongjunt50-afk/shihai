@@ -370,11 +370,14 @@ class PersonaEngine:
         dom, aux = typ.jung_dominant, typ.jung_auxiliary
         jd = typ.jung_scores.get(dom, 0.0)
         ja = typ.jung_scores.get(aux, 0.0)
-        if dom:
-            info = JUNG_PATHWAYS.get(dom, {})
-            certainty = "稳定" if (jd - ja) > 0.06 else "仍在形成中"
-            out.append("我消化经历的方式: %s(%s) —— %s。这个主导方式%s。"
-                       % (info.get("name", dom), dom, info.get("poem", ""), certainty))
+        if not dom:
+            # 空库: 没有经历就没有类型。硬吐一个"我是 X 型、健康度 0、正在解离"
+            # 是编造 —— 比什么都不说更糟, 因为 agent 会当真。
+            return ["我还没有足够多的经历, 所以还谈不上是什么类型的人。"]
+        info = JUNG_PATHWAYS.get(dom, {})
+        certainty = "稳定" if (jd - ja) > 0.06 else "仍在形成中"
+        out.append("我消化经历的方式: %s(%s) —— %s。这个主导方式%s。"
+                   % (info.get("name", dom), dom, info.get("poem", ""), certainty))
         if typ.ennea_type:
             e = ENNEA[typ.ennea_type]
             wing = "w%d" % typ.ennea_wing if typ.ennea_wing else ""

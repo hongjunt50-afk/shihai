@@ -119,15 +119,17 @@ def cmd_context(args):
     agent 的行为自然带上"经历过这些"的偏差。
     """
     store, _, eng, _, pers = build(args.db)
-    snap = store.last_persona()
-    if snap is None:
-        card = pers.refresh().card
-    else:
-        card = snap["card"]
+    # persist=False: 投影是只读视图, 看一眼不该让人格往前走一步(也不该多一个快照点)
+    card = pers.refresh(persist=False).card
     hits = eng.recall(Cue(text=args.query or ""), limit=args.limit)
     tasks = store.open_tasks()
+    facts = store.facts()
 
-    parts = ["## 我是谁", card, "", "## 此刻想起来的"]
+    parts = ["## 我是谁", card]
+    if facts:
+        parts += ["", "## 我记得的事实"]
+        parts += ["- %s (置信 %.2f)" % (f["claim"], f["confidence"]) for f in facts]
+    parts += ["", "## 此刻想起来的"]
     parts += ["- [%s] %s" % ("核" if h.core else "常", h.summary) for h in hits] or ["- (无)"]
     if tasks:
         parts += ["", "## 我还欠着"]
@@ -136,6 +138,7 @@ def cmd_context(args):
     text = "\n".join(parts)
     if args.json:
         print(json.dumps({"persona": card, "recalled": [h.summary for h in hits],
+                          "facts": [f["claim"] for f in facts],
                           "tasks": [t["title"] for t in tasks]}, ensure_ascii=False, indent=2))
     else:
         print(text)

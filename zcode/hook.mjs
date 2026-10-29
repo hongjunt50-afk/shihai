@@ -87,6 +87,12 @@ async function session() {
   if (r.selfkb && !r.selfkb.startsWith('(还没有')) {
     parts.push('## 关于我自己(可塑性记忆)\n' + r.selfkb.trim());
   }
+  // 语义层: 用户偏好、人事归属这类稳定事实。以前在投影里没有出口,
+  // 抽对了也看不见 —— 只能靠 agent 主动 recall 才捞得到。
+  if (Array.isArray(r.facts) && r.facts.length) {
+    parts.push('## 我记得的事实\n'
+      + r.facts.map((f) => `- ${f.claim}(置信 ${Number(f.confidence).toFixed(2)})`).join('\n'));
+  }
   let text = parts.filter(Boolean).join('\n\n');
   if (!text) return;
   if (text.length > PROJECTION_MAX) text = text.slice(0, PROJECTION_MAX) + '\n…(已截断)';

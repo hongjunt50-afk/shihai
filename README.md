@@ -806,7 +806,7 @@ python hooks.py freemode on|off|status|run [--cycles 3]
 | 宿主 | 文件 | 挂点 |
 |---|---|---|
 | **ZCode** | `zcode/hook.mjs` | `SessionStart` 注入投影(0.2s) + `Stop` 入库本题新增正文(真跑是 0.07s; 冷启动一次约 0.5s) |
-| **DSH** | `F:\AI\projects\dsh-shihai` | `system-prompt/assemble` 注入 + `session/event` 沉淀 + 五个工具 |
+| **DSH** | DSH 原生插件 `dsh-shihai`(暂未单独开源) | `system-prompt/assemble` 注入 + `session/event` 沉淀 + 五个工具 |
 | **每日固结** | cron | `python hooks.py tick --days 1 --selfkb-days 1` |
 
 ZCode 侧的两个坑写在 `zcode/hook.mjs` 头部: `Stop` 绝不输出 `decision:block`(那是拦停语义,

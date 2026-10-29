@@ -231,6 +231,37 @@ Final score is multiplied by `(0.45 + 0.55 × strength)` — **fading memories a
 
 `recall_all()` returns all three layers at once: **episodes** (for empathy), **semantic facts** (for answers), **self-knowledge** (for "what kind of being am I").
 
+### How the semantic layer reaches the projection, and how old facts give way
+
+The semantic layer is "who the user is / what they're doing" — preferences, reporting
+lines, tech stack. It used to have **no exit into the projection**: only
+`ask(all:true)` returned it, while daily injection goes through `context`. Facts were
+extracted correctly and then never seen. `context` now carries a `facts` field
+(confidence ≥0.5, top 6), injected by all three renderers (ZCode hook / DSH plugin / CLI).
+
+**A revision must be able to displace the old fact** (fixed 2026-10-29). In
+`resolve_semantic` the "near-duplicate" test ran *before* the "contradiction" test,
+and "I don't like coffee anymore" overlaps "I like coffee" at **1.00** on bigrams —
+so an explicit correction took the NOOP path and bumped the old fact's confidence
+from 0.7 to 0.75. The user revised; the system recorded a confirmation. The order
+is flipped, and person/role flip pairs were added:
+
+| Old claim | New claim | Verdict |
+|---|---|---|
+| I like coffee | I don't like coffee anymore | SUPERSEDE (old demoted to 0.3) |
+| My boss is Zhang | My boss was replaced by Li | SUPERSEDE |
+| I own the payments module | I no longer own the payments module | SUPERSEDE |
+| We use mysql for storage | We switched to duckdb for storage | SUPERSEDE |
+| I like coffee | I don't like cilantro | ADD (two independent preferences) |
+| I own payments | I own the user module | ADD |
+
+Semantic extraction also changed from "cut 30 chars after a signal word" to
+**whole-sentence capture**: the old version truncated "Zhang left, my boss is now Li"
+into half a sentence that barely overlapped "my boss is Zhang", so the revision could
+never match. Whole sentences let the shared "my boss" stem connect them. Speaker
+prefixes ("user:", "me:") are stripped before storage — otherwise two statements of
+the same fact get diluted below the overlap threshold.
+
 ---
 
 ## Personality typology: Jung × Enneagram
@@ -437,9 +468,52 @@ Three rules: catchphrases are **probabilities** ("40% of the time", with "don't 
 | Layer | Mechanism | Implementation |
 |---|---|---|
 | **LTP/LTD** | used connections strengthen, wrong ones weaken | works `+0.06` / fails `−0.18` (one failure outweighs one success) |
-| **Structural** | unused connections are pruned | decay by kind, reclaimed at 0.08 |
+| **Structural** | unused connections are pruned | decay **by days** `rate×k×days`, reclaimed at 0.08 (see below) |
 | **Homeostatic** | bounded budget so nothing monopolises | per-kind character budget |
 | **Metaplasticity** | what changes fast vs. what is bedrock | `style/voice` rate 0.8; `identity` 0.2 and **never reclaimed** |
+
+**Decay must follow elapsed time, not call count** (fixed 2026-10-29). The old
+version subtracted a fixed `0.03×k` per `tick`, so *how often you called tick*
+decided how fast self-knowledge rotted: with an integration layer that consolidates
+every 8 experiences (the DSH plugin does), a single busy workday was enough to
+delete a `voice` entry outright. Now a pure consolidation round with `days=0`
+subtracts nothing, one day equals `0.03×k`, and catch-up rounds are capped at
+30 days:
+
+```bash
+python hooks.py tick --days 1 --selfkb-days 1   # daily cron: advance clock + decay self-knowledge
+python hooks.py tick                            # in-session consolidation: spends no plasticity
+```
+
+`moment` (our little moments) dropped from weight 1.0 to 0.5 — it should not be
+more brittle than `identity`.
+
+### Automatic entry: no manual teaching required (2026-10-29)
+
+All of the above only holds if something actually *writes*. Until this change
+`self_knowledge` had exactly one writer — a human calling `selflearn`, or the agent
+invoking the tool. So a user saying "stop writing me summaries" or "I prefer you
+lead with the conclusion" only ever became an episodic memory: a new session could
+not recall it, and the human had to teach it again. That is precisely the scenario
+shihai exists for, and it was the one manual step in the loop.
+
+`ingest` now runs every sentence through `kb.auto_kind`:
+
+| Accepted (into self-knowledge) | Rejected (stays world knowledge) |
+|---|---|
+| "stop writing me summaries", "don't talk around the point" | "this project should use duckdb from now on" (a project decision) |
+| "I prefer you lead with the conclusion", "I look at data first" | "the endpoint must enforce auth" (a work rule) |
+| "don't use pleasantries with me" → stored as "I don't use pleasantries" | "I had a meeting at 3pm" (a one-off event) |
+
+The gate is stricter than `classify`: the sentence must contain a **persistent
+directive** (don't/from now on/speak/call me…) or a **first-person self-description**
+(my name is/I'm used to/I prefer…), and must not contain project-level nouns
+(project/system/endpoint/database/our team). Better to miss one than to write
+someone else's world knowledge into a personality.
+
+A sentence never lands in both layers — self-knowledge wins and the semantic layer
+skips it. Storing both means a revision has to be applied twice, which drifts.
+
 
 ### Why this solves the context limit
 
@@ -576,6 +650,8 @@ python hooks.py drift [--limit 15]
 python hooks.py selflearn "..." [--kind identity|care|style|voice|moment]
 python hooks.py selfkb [--kind ...]
 python hooks.py selfmaint
+python hooks.py task [--title "..." --due tomorrow]        # list / add / close
+python hooks.py task close --title "..."                   # or --id 3 --status abandoned
 python hooks.py diary close|recent|recall|compose|export|import
 python hooks.py warmth --add 3 --day 2026-10-21
 python hooks.py wiki sync|ingest|lint|index
@@ -596,6 +672,24 @@ python hooks.py freemode on|off|status|run [--cycles 3]
 ```
 
 Each point is independent and portable: a Stop hook, a cron job, a pre-request middleware. **No daemon required** to run the whole loop.
+
+### Ready-made integrations: ZCode / DSH
+
+Both host adapters ship in this repo — no need to build your own:
+
+| Host | File | Hook points |
+|---|---|---|
+| **ZCode** | `zcode/hook.mjs` | `SessionStart` injects the projection (0.19s) + `Stop` ingests newly added transcript text (0.07s when warm) |
+| **DSH** | DSH native plugin `dsh-shihai` (not separately open-sourced yet) | `system-prompt/assemble` injection + `session/event` capture + five tools |
+| **Daily consolidation** | cron | `python hooks.py tick --days 1 --selfkb-days 1` |
+
+Two traps are documented at the top of `zcode/hook.mjs`: a `Stop` hook must **never**
+emit `decision:block` (that is blocking semantics and will wedge session teardown),
+and reading the transcript from the host's local DB **must filter `synthetic`
+messages** — otherwise the "available agent types" / "deferred tools" blobs the host
+injects every turn (5–14 KB each) get written into memory as if the user had said them.
+A third: when there is too little new text, the ingestion cursor must **not advance**,
+or every short turn in a day is silently dropped.
 
 ---
 
@@ -661,10 +755,13 @@ Other performance notes: recall candidates are capped at 200; only the top-5 cor
 ## Tests
 
 ```bash
-python tests/test_core.py   # 31 end-to-end regressions
+python tests/test_core.py   # 44 end-to-end regressions
+node  zcode/_selftest.mjs   # 6 hook assertions (synthetic filtering, cursor semantics)
 ```
 
-Each assertion guards a bug that was actually fixed: virtual clock, short-query recall, inverted-index speed, typology convergence, mem0-style conflict resolution, free-mode divergence, persona-graph evolution, voice/self-knowledge wiring, plasticity LTP/LTD, no-query bootstrap, identity never reclaimed, three-layer recall, diary anchors, human-edit protection, LLM enrichment + fallback, wiki sync/lint, wiki reverse ingest, viz rendering, (v0.7.0) persona implantation: seed-as-prior, bounded and audited drift, read-only lookups, re-implant history, rebound when a dimension loses its fulcrums, and unchanged behaviour for never-implanted libraries, and (v0.7.1) retrieval hardening: ranked semantic hits, graph-index equivalence for core scoring, old-database index backfill, and time-hint flood control.
+Each assertion guards a bug that was actually fixed: virtual clock, short-query recall, inverted-index speed, typology convergence, mem0-style conflict resolution, free-mode divergence, persona-graph evolution, voice/self-knowledge wiring, plasticity LTP/LTD, no-query bootstrap, identity never reclaimed, three-layer recall, diary anchors, human-edit protection, LLM enrichment + fallback, wiki sync/lint, wiki reverse ingest, viz rendering, (v0.7.0) persona implantation: seed-as-prior, bounded and audited drift, read-only lookups, re-implant history, rebound when a dimension loses its fulcrums, and unchanged behaviour for never-implanted libraries, (v0.7.1) retrieval hardening: ranked semantic hits, graph-index equivalence for core scoring, old-database index backfill, and time-hint flood control, and (v0.7.2) the four things that made "not forgetting" real: self-knowledge decay following days rather than call count, session directives entering self-knowledge automatically (rewritten to first person, never double-stored in the semantic layer), revisions superseding stale facts (preferences *and* person/role changes) while independent facts stay apart, task close/dedup plus intent-gated extraction, idempotent edges, person extraction rejecting adverbs and common nouns, an empty database refusing to invent a personality, and a projection whose health figure agrees with itself.
+
+Every new assertion was verified red-green: revert the fix, re-run, confirm the test fails with an AssertionError (not an environment error). That process caught two tests that would have passed against the *unfixed* code.
 
 ---
 

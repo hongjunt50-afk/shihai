@@ -171,8 +171,8 @@ async function stop() {
   const lastAt = Number(prev.at || 0);
   const chars = delta.user.length + delta.assistant.length;
   if (chars < TELL_MIN_CHARS || (lastAt && now - lastAt < TELL_COOLDOWN_MS)) {
-    // 量不够或太频繁: 只推进游标, 让下次一并入库(不丢内容)。
-    writeState(path, { ...prev, seq: delta.maxSeq });
+    // 量不够或太频繁: **不推进游标**, 让这一轮的正文留到下次一起入库。
+    // 推进游标等于把短回合的内容直接丢掉 —— 一天里几十个短回合会全部消失。
     return;
   }
 
@@ -183,8 +183,8 @@ async function stop() {
   ].join('\n');
 
   const r = await callShihai('tell', { text: record, self: true, importance: 0.45, session: sid });
+  // 只有真正入库了才推进游标; 失败就保持原样, 下轮重试。
   if (r) writeState(path, { seq: delta.maxSeq, at: now, events: Number(prev.events || 0) + 1 });
-  else writeState(path, { ...prev, seq: delta.maxSeq });   // 入库失败不推进时间戳, 下轮重试
 }
 
 const mode = process.argv[2];

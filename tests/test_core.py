@@ -239,18 +239,22 @@ def test_self_kb_decay_follows_days_not_call_count():
     from shihai.kb import SelfKB
     with tempfile.TemporaryDirectory() as tmp:
         store, ing, eng, life, pers = build(tmp)
-        kb = SelfKB(store)
-        kb.learn("我说话别客套", kind="voice")
+        try:
+            kb = SelfKB(store)
+            kb.learn("我说话别客套", kind="voice")
 
-        for _ in range(20):
-            kb.maintain(decay=True, days=0)    # 同日 20 次纯固结: 不该动
-        p = store.self_knowledge()[0]["plasticity"]
-        assert abs(p - 0.55) < 1e-6, "同一天内的多次固结不该消耗可塑性: %.3f" % p
+            for _ in range(20):
+                kb.maintain(decay=True, days=0)    # 同日 20 次纯固结: 不该动
+            p = store.self_knowledge()[0]["plasticity"]
+            assert abs(p - 0.55) < 1e-6, "同一天内的多次固结不该消耗可塑性: %.3f" % p
 
-        kb.maintain(decay=True, days=1)        # 真正过去一天: 才扣一次
-        p1 = store.self_knowledge()[0]["plasticity"]
-        assert p1 < p and abs(p - p1 - 0.03 * 0.8) < 1e-6, "一天的衰减量应等于 rate*k"
-        store.close()
+            kb.maintain(decay=True, days=1)        # 真正过去一天: 才扣一次
+            p1 = store.self_knowledge()[0]["plasticity"]
+            assert p1 < p and abs(p - p1 - 0.03 * 0.8) < 1e-6, "一天的衰减量应等于 rate*k"
+        finally:
+            # Windows 下句柄不关会让 TemporaryDirectory 清理抛 PermissionError,
+            # 把断言失败伪装成环境错误 —— 红绿验证时看不出真正原因。
+            store.close()
 
 
 def test_context_projects_selfkb():

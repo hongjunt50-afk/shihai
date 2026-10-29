@@ -491,9 +491,22 @@ val = clamp(cur, seed_new - cap_new, seed_new + cap_new)
 | 层 | 机制 | 实现 |
 |---|---|---|
 | **LTP/LTD** | 用得上的加强, 用错的削弱 | 奏效 `+0.06` / 失败 `−0.18`(错一次比成一次记得牢) |
-| **结构可塑性** | 长期不用被剪掉 | 按类型衰减, 跌到 0.08 回收 |
+| **结构可塑性** | 长期不用被剪掉 | **按天数**衰减 `rate×k×days`, 跌到 0.08 回收(见下) |
 | **稳态可塑性** | 必须有预算上限, 防止垄断 | 每类知识有字数预算 |
 | **元可塑性** | 什么该快变, 什么该固若磐石 | `style/voice` 速率 0.8, `identity` 0.2 且**永不回收** |
+
+**衰减必须按时间走, 不能按调用次数走**(2026-10-29 修)。旧版每跑一次 `tick` 固定扣 `0.03×k`,
+于是"多久调一次 tick"直接决定了自我知识烂得多快: 接入层每 8 条经历固结一次(DSH 插件如此)的话,
+聊得越勤的一天掉得越狠, 实测同一个工作日就把一条 `voice` 删干净了。现在 `days=0` 的纯固结轮
+不扣分, 一天只等于 `0.03×k`, 单轮补跑封顶 30 天:
+
+```bash
+python hooks.py tick --days 1 --selfkb-days 1   # 每日 cron: 推进记忆时钟 + 自我知识衰减
+python hooks.py tick                            # 会话中的纯固结: 不消耗可塑性
+```
+
+`moment`(我们的点滴)从权重 1.0 降到 0.5 —— 它不该比 `identity` 还脆。
+
 
 ### 为什么它解决"上下文限制"
 
@@ -733,6 +746,20 @@ python hooks.py freemode on|off|status|run [--cycles 3]
 
 四个点各自独立, 任何平台都能挂: Stop hook、cron、请求前中间件。**不需要常驻进程**也能跑通全链路。
 
+### 现成接入: ZCode / DSH
+
+两台主机的接法已经写好在仓库里, 不需要现造:
+
+| 宿主 | 文件 | 挂点 |
+|---|---|---|
+| **ZCode** | `zcode/hook.mjs` | `SessionStart` 注入投影(0.2s) + `Stop` 入库本题新增正文(真跑是 0.07s; 冷启动一次约 0.5s) |
+| **DSH** | `F:\AI\projects\dsh-shihai` | `system-prompt/assemble` 注入 + `session/event` 沉淀 + 四个工具 |
+| **每日固结** | cron | `python hooks.py tick --days 1 --selfkb-days 1` |
+
+ZCode 侧的两个坑写在 `zcode/hook.mjs` 头部: `Stop` 绝不输出 `decision:block`(那是拦停语义,
+会卡住收尾); 从本地库读会话正文**必须过滤 `synthetic`**, 否则宿主每轮塞的「可用 agent 类型」
+「deferred tools」那几千字合成消息会把识海灌成垃圾。
+
 ---
 
 ## 数据模型
@@ -820,7 +847,7 @@ warmth_ledger(id, day, delta, reason, created)
 python tests/test_core.py
 ```
 
-**31 条端到端回归**, 每个断言对应一个真实修过的坑:
+**32 条端到端回归**, 每个断言对应一个真实修过的坑:
 
 | 测试 | 守什么 |
 |---|---|
@@ -838,6 +865,7 @@ python tests/test_core.py
 | `test_plasticity_ltp_ltd` | 奏效加强/失败削弱/到底回收 |
 | `test_bootstrap_no_query` | 无 query 自举 |
 | `test_self_kb_identity_never_forgotten` | identity 永不回收 |
+| `test_self_kb_decay_follows_days_not_call_count` | 同日多次固结不消耗可塑性, 只有天数才扣 |
 | `test_recall_three_layers` | 三层召回 |
 | `test_diary_close_and_recall` | 收日 + 感受锚点 |
 | `test_diary_human_edit_protected` | 人工修订不被覆盖 |

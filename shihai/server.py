@@ -97,8 +97,11 @@ class ShihaiService:
         rep = self.lifecycle.tick(days=days)
         out = {"decayed": rep.decayed, "dormant": rep.dormant,
                "promoted": rep.promoted, "reflected": rep.reflected}
-        # 自我知识随 tick 一并衰减/回收 —— 不要求人记得单独跑 selfmaint
-        out["selfkb"] = self.kb.maintain(decay=True)
+        # 自我知识随 tick 一并衰减/回收 —— 不要求人记得单独跑 selfmaint。
+        # 衰减天数与 lifecycle 的虚拟时钟分开传: days 是"模拟流逝"(测试/演示用),
+        # selfkb_days 是真实过去的天数(每日 cron 传 1), 缺省沿用 days。
+        out["selfkb"] = self.kb.maintain(
+            decay=True, days=float(a.get("selfkb_days", days or 0)))
         # tick 顺带刷人格快照 —— 固结与投影保持同步
         self.persona.refresh()
         # 自由模式: 常驻服务默认每天跑几个行为环(cron 触发 tick 时自然发生)
@@ -249,7 +252,9 @@ class ShihaiService:
                 "weak": [{"kind": k, "text": t, "plasticity": p} for k, t, p in b.weak]}
 
     def h_selfmaint(self, a):
-        return self.kb.maintain(decay=bool(a.get("decay", True)))
+        # 手工维护默认按"一天"结算 —— 它是衰减+回收的显式入口, 给 0 天等于空跑
+        return self.kb.maintain(decay=bool(a.get("decay", True)),
+                                days=float(a.get("days", 1.0)))
 
     def h_diary(self, a):
         action = a.get("action", "recent")

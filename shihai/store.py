@@ -571,15 +571,26 @@ class Store:
         self.conn.commit()
         return p
 
-    def decay_self(self, rate=0.03, floor=0.05):
+    def decay_self(self, rate=0.03, floor=0.05, days=0.0):
         """长期不用的自我知识会变薄(结构可塑性: 不用则剪)。
-        注意: identity 类衰减最慢 —— 身份不该因为三个月没提就消失。"""
+        注意: identity 类衰减最慢 —— 身份不该因为三个月没提就消失。
+
+        days 是本次 tick 实际推进的天数: 衰减必须按时间走, 不能按调用次数走。
+        以前每调一次固定扣 rate*k, 于是同一天里每 8 条经历触发一次 tick 的
+        调用频率直接决定了自我知识烂得多快 —— 聊得越多, "我是谁"掉得越快。
+        现在 days=0 的纯固结轮不扣分, 1 天 = rate*k(与旧版每 tick 一次等价)。
+        上限 30 天/轮: 一次补跑不能把三个月没跑的量一次性砸下来。
+        """
+        span = max(0.0, min(30.0, float(days or 0.0)))
+        if span <= 0:
+            return 0
         now = utcnow()
         rows = self.conn.execute("SELECT * FROM self_knowledge").fetchall()
         changed = 0
         for r in rows:
-            k = {"identity": 0.2, "care": 0.6, "style": 0.8, "voice": 0.8}.get(r["kind"], 1.0)
-            p = max(floor, float(r["plasticity"]) - rate * k)
+            k = {"identity": 0.2, "care": 0.6, "style": 0.8, "voice": 0.8,
+                 "moment": 0.5}.get(r["kind"], 0.6)
+            p = max(floor, float(r["plasticity"]) - rate * k * span)
             if abs(p - float(r["plasticity"])) > 1e-6:
                 self.conn.execute(
                     "UPDATE self_knowledge SET plasticity=?, updated=? WHERE id=?",

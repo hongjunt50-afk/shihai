@@ -221,12 +221,35 @@ def test_self_kb_identity_never_forgotten():
         kb = SelfKB(store)
         kid, _, _ = kb.learn("我叫小海", kind="identity")
         for _ in range(20):
-            store.decay_self()
+            store.decay_self(days=1)          # 20 天, 不是 20 次调用
         row = store.conn.execute("SELECT plasticity FROM self_knowledge WHERE id=?",
                                  (kid,)).fetchone()
         assert row["plasticity"] >= 0.2, "identity 应衰减极慢: %.2f" % row["plasticity"]
         rep = kb.maintain()
         assert "我叫小海" not in rep["forgotten"], "identity 永不回收"
+        store.close()
+
+
+def test_self_kb_decay_follows_days_not_call_count():
+    """2026-10-29 修: 自我知识必须按天数衰减, 不能按 tick 次数。
+
+    旧版每次 tick 固定扣 0.03*k, 于是 DSH 那种「每 8 条经历 tick 一次」的接入
+    方式让聊天越频繁的会话掉得越快 —— 实测同一个工作日里就把 voice 删掉了。
+    """
+    from shihai.kb import SelfKB
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        kb = SelfKB(store)
+        kb.learn("我说话别客套", kind="voice")
+
+        for _ in range(20):
+            kb.maintain(decay=True, days=0)    # 同日 20 次纯固结: 不该动
+        p = store.self_knowledge()[0]["plasticity"]
+        assert abs(p - 0.55) < 1e-6, "同一天内的多次固结不该消耗可塑性: %.3f" % p
+
+        kb.maintain(decay=True, days=1)        # 真正过去一天: 才扣一次
+        p1 = store.self_knowledge()[0]["plasticity"]
+        assert p1 < p and abs(p - p1 - 0.03 * 0.8) < 1e-6, "一天的衰减量应等于 rate*k"
         store.close()
 
 

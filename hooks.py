@@ -85,6 +85,8 @@ def main(argv=None):
 
     k = sub.add_parser("tick", help="固结一轮(定时任务调用)")
     k.add_argument("--days", type=float, default=None)
+    k.add_argument("--selfkb-days", type=float, default=None,
+                   help="自我知识衰减的真实天数(默认同 --days); 每日 cron 给 1")
     k.add_argument("--free", type=int, default=0, help="自由模式行为环数")
 
     f = sub.add_parser("freemode", help="自由模式开关/运行")
@@ -158,7 +160,10 @@ def main(argv=None):
         print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
         return 0 if ok else 1
     elif a.cmd == "tick":
-        ok, r = svc.dispatch("tick", {"days": a.days, "free_cycles": a.free})
+        args = {"days": a.days, "free_cycles": a.free}
+        if a.selfkb_days is not None:
+            args["selfkb_days"] = a.selfkb_days
+        ok, r = svc.dispatch("tick", args)
         print(json.dumps({"ok": ok, "result": r}, ensure_ascii=False))
         return 0 if ok else 1
     elif a.cmd == "selflearn":

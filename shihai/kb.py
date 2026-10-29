@@ -167,12 +167,15 @@ class SelfKB:
         return Bootstrap(block=block, counts=counts, weak=weak)
 
     # -- 维护 -----------------------------------------------------------
-    def maintain(self, decay=True):
+    def maintain(self, decay=True, days=0.0):
         """自动维护: 衰减未用的自我知识, 回收被压到底的。
-        返回维护报告(可打印给人看)。"""
+        返回维护报告(可打印给人看)。
+
+        days 是本次固结推进的天数, 透传给 decay_self —— 不按调用次数衰减。
+        """
         rep = {"decayed": 0, "forgotten": []}
         if decay:
-            rep["decayed"] = self.store.decay_self()
+            rep["decayed"] = self.store.decay_self(days=days)
         rows = self.store.conn.execute(
             "SELECT * FROM self_knowledge WHERE plasticity<=0.08").fetchall()
         for r in rows:

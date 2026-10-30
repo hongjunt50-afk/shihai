@@ -900,7 +900,7 @@ warmth_ledger(id, day, delta, reason, created)
 python tests/test_core.py
 ```
 
-**44 条端到端回归**, 每个断言对应一个真实修过的坑:
+**45 条端到端回归**, 每个断言对应一个真实修过的坑:
 
 | 测试 | 守什么 |
 |---|---|
@@ -948,6 +948,7 @@ python tests/test_core.py
 | `test_empty_db_does_not_invent_personality` | 空库不编「我是 2w1, 正在解离」 |
 | `test_context_health_is_self_consistent` | 投影里健康度只有一个值(卡面/voice/typology 同源) |
 | `test_context_projects_facts` | 语义层进投影, 且被改口的旧事实不再出现 |
+| `test_speaker_attribution_keeps_agent_narration_out` | 助手的自述不进语义层/自我知识库 |
 
 ---
 

@@ -63,13 +63,8 @@ _NOT_NAME = set("""
 """.split())
 
 
-def _sentences(text):
-    """按句末标点与换行切句, 并剥掉「用户：」「我：」这类说话人前缀。
-
-    前缀必须剥: DSH/ZCode 钩子入库的记录是 `用户：…\\n我：…` 格式,
-    不剥的话语义断言会变成「用户：我喜欢喝咖啡」, 与旧断言「我喜欢喝咖啡」
-    的二字组重叠被稀释, 改口判定就会漏。
-    """
+def _raw_sentences(text):
+    """按句末标点与换行切句。不做说话人处理。"""
     out, buf = [], []
     for ch in text:
         if ch in "。;；!！?？\n":
@@ -82,10 +77,11 @@ def _sentences(text):
     s = "".join(buf).strip()
     if s:
         out.append(s)
-    return [x for x in (_strip_speaker(s) for s in out) if x]
+    return out
 
 
 _SPEAKER = re.compile(r"^\[[^\]]*\]\s*|^(?:用户|我|助手|assistant|user|系统)\s*[:：]\s*", re.I)
+_SPEAKER_TAG = re.compile(r"^(用户|user|我|助手|assistant|系统)\s*[:：]\s*", re.I)
 
 
 def _strip_speaker(sent):
@@ -94,6 +90,45 @@ def _strip_speaker(sent):
         prev = sent
         sent = _SPEAKER.sub("", sent).strip()
     return sent
+
+
+def _utterances(text):
+    """切句并标注说话人。返回 [(who, sentence)], who ∈ {"user", "self", "unknown"}。
+
+    必须**先记下说话人再剥前缀**。旧版只剥不记, 于是钩子入库的
+    `用户：…\n我：我用 PowerShell 请求端口…` 里那句助手自述被当成用户事实
+    写进语义层, 再随投影注入 —— 实测线上库里三条 semantic 全是这么来的
+    (「我用 OCR 读屏幕」「我用记事本这个程序作为对照」), 读起来像 agent
+    在自我介绍技术栈。
+
+    归属规则: 标记一直生效到下一条标记; 「用户：」单独一行时, 下一句才归属它。
+    没有标记的原始文本记为 unknown(单条 tell 的常见形态, 按用户说的处理)。
+    """
+    out, who = [], "unknown"
+    for raw in _raw_sentences(text):
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            continue                      # "[DSH 会话 · …]" 记录头, 不是内容
+        m = _SPEAKER_TAG.match(s)
+        if m:
+            tag = m.group(1).lower()
+            who = "self" if tag in ("我", "助手", "assistant") else "user"
+            s = _strip_speaker(s[m.end():])
+            if not s:
+                continue                  # 空标记行, 归属留给下一句
+        else:
+            s = _strip_speaker(s)
+        if s:
+            out.append((who, s))
+    return out
+
+
+def _sentences(text):
+    """只要句子不要说话人(兼容旧调用)。"""
+    return [s for _who, s in _utterances(text)]
+
 
 
 _DEADLINE = re.compile(r"(下?周[一二三四五六日天]|今天|明天|后天|本周[一二三四五六日天]|\d{1,2}月\d{1,2}[日号])")
@@ -245,9 +280,17 @@ class Ingestor:
 
         skip: 已经作为自我知识入库的句子。两边都存一份的话, 用户改口时
         要改两处, 迟早漂移 —— 自我知识优先。
+
+        只收**用户**说的话。钩子入库的记录带 `用户：/我：` 标记, 助手那句
+        「我用 PowerShell 请求端口，得到 403」是它自己在描述刚才干了什么,
+        不是关于用户的稳定事实 —— 收进去之后会被投影注入, 读起来像 agent
+        在自我介绍技术栈。线上库实测三条 semantic 全是这么来的。
+        无标记的纯文本记为 unknown, 照旧处理(单条 tell 的常见形态)。
         """
         out = []
-        for sent in _sentences(text):
+        for who, sent in _utterances(text):
+            if who == "self":
+                continue
             if not _FACT_SIGNAL.search(sent):
                 continue
             claim = sent.strip()
@@ -288,11 +331,16 @@ class Ingestor:
 
         返回 (入自我知识库的 [(kind, text)], 已被认领的原始句子)。
         第二项给 _attach_semantic 用 —— 同一句话不该在两个层各存一份。
+
+        只收用户说的。助手那句「我更喜欢先给结论」是对用户的建议, 不是用户
+        对它的要求; 反过来只有用户说的才算"我的行事规矩"。
         """
         from .kb import auto_kind, as_first_person, SelfKB
         out, claimed = [], set()
         kb = SelfKB(self.store)
-        for sent in _sentences(text):
+        for who, sent in _utterances(text):
+            if who == "self":
+                continue
             kind = auto_kind(sent)
             if not kind:
                 continue

@@ -742,6 +742,32 @@ def test_auto_self_knowledge_rewrites_to_first_person():
     assert as_first_person("你以后别用客套话").startswith("我")
 
 
+def test_speaker_attribution_keeps_agent_narration_out():
+    """助手的自述不能进语义层/自我知识库。
+
+    钩子入库的记录是 `用户：…\\n我：…`。旧版只剥前缀不记说话人, 于是助手那句
+    「我用 PowerShell 请求端口，得到 403」被当成用户事实入库, 再随投影注入 ——
+    线上库实测三条 semantic 全这么来的, 读起来像 agent 在自我介绍技术栈。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            ev = ing.ingest(Observation(
+                "[DSH 会话 · 2026-10-25 09:52]\n"
+                "用户：\n"
+                "我：我用 PowerShell 请求端口，得到 403。我更喜欢先给结论。\n"
+                "用户：我的老板是张三。\n", modality="self"), importance_hint=0.6)
+            claims = [c for c, _a in ev.semantic]
+            assert not any("PowerShell" in c for c in claims), \
+                "助手自述不该进语义层: %s" % claims
+            assert any("老板" in c for c in claims), "用户说的话应该进来: %s" % claims
+            texts = [t for _k, t in ev.selfkb]
+            assert not any("更喜欢先给结论" in t for t in texts), \
+                "助手说的话不该变成 agent 的行事规矩: %s" % texts
+        finally:
+            store.close()
+
+
 def test_edge_is_idempotent():
     """同 (src,dst,rel) 只留一条边。旧版 31 条边里只有 2 条是不同的。"""
     s = Store(":memory:")

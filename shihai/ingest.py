@@ -56,15 +56,45 @@ _PERSON = re.compile(
     r"|([\u4e00-\u9fa5]{2,3})\s*(?:调走|离职|辞职|退休|入职|走人))"
 )
 # 不像人名的常见词(形容词/连词/副词尾巴)。宁可漏人名, 也不要把图灌脏。
+# 2026-10-30 补: 「结论先说：」把「结论先」抽成了人名 —— 三字窗口截断了
+# 「结论」这个词。改成按词判断前缀, 不再靠穷举三字组合。
 _NOT_NAME = set("""
 直接 这个 那个 现在 应该 可以 需要 因为 所以 但是 如果 然后 其实 已经 还是 就是
 最大 最小 主要 重要 明显 具体 一般 通常 目前 当时 刚才 于是 因此 另外 同时 首先
 本身 独立 判断 问题 结论 方案 结果 情况 方法 方式 部分 内容 时候 地方 东西 事情
 """.split())
+# 名字里出现这些词根就判定不是人名(「结论先」「造成的」「我的事」都栽在这里)
+_NOT_NAME_STEMS = ("结论", "问题", "方案", "建议", "原因", "情况", "意思", "部分",
+                   "内容", "时候", "地方", "东西", "事情", "机制", "细节", "答案")
+
+# 引号/加粗/代码里的内容是在**引用**别处的话, 不是这段经历在断言它。
+# 与 kb._QUOTED 同源, 故意各留一份: ingest 不能顶层 import kb(会循环)。
+_QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”|「[^」]*」|『[^』]*』|`[^`]*`|\*\*[^*]*\*\*")
+
+
+_FENCE = "`" * 3
+
+
+def _without_fences(text):
+    """去掉 ``` 围栏块。围栏里多是助手在举例/贴代码, 不是用户真说过的话。
+
+    必须**在抽取之前**统一去掉一次。旧版只在切句函数里跳过围栏, 而
+    `_split_nodes` / `_attach_task` / `_attach_person_promise` 都在扫原始
+    text —— 实测 event#13 里围栏中的示例句「…李四当 lead, 张三调走了」
+    照样长出了 person=张三 节点。
+    """
+    out, in_fence = [], False
+    for line in text.split("\n"):
+        if line.strip().startswith(_FENCE):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
 
 
 def _raw_sentences(text):
-    """按句末标点与换行切句。不做说话人处理。"""
+    """按句末标点与换行切句。不做说话人处理(围栏已在 _without_fences 里去掉)。"""
     out, buf = [], []
     for ch in text:
         if ch in "。;；!！?？\n":
@@ -132,7 +162,14 @@ def _sentences(text):
 
 
 _DEADLINE = re.compile(r"(下?周[一二三四五六日天]|今天|明天|后天|本周[一二三四五六日天]|\d{1,2}月\d{1,2}[日号])")
-_TOPIC = re.compile(r"(?:关于|有关|问题|讨论|主题)[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,16})")
+# 主题节点。2026-10-30 收紧: 原来把「问题/讨论」也当触发词, 于是
+# 「问题造成的遗忘」→ theme=造成的遗忘、「…的问题」→ theme=的关于记忆系统的问题,
+# 真实库里攒出了 theme=在喂料端/的现成答案/要顺便修掉 这种碎片。这些节点会喂给
+# lifecycle._distill(同一主题下 ≥2 条就蒸馏成语义事实)和 free mode 选题, 脏主题
+# 会一路污染到语义层。现在只认显式的「关于/有关/主题」标记, 且捕获段不能以
+# 结构助词开头。
+_TOPIC = re.compile(r"(?:关于|有关|主题)[:：]?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,16})")
+_TOPIC_BAD_HEAD = ("的", "在", "要", "就", "是", "了", "和", "与", "对", "把", "被")
 _LOCATION = re.compile(r"(?:在|去|位于)([\u4e00-\u9fa5A-Za-z0-9]{2,10})(?:市|区|路|街|楼|号|公司|家)")
 
 # 事实句信号: 命中即整句进语义层(不再只截取信号词后面那一小段)。
@@ -195,14 +232,17 @@ class Ingestor:
                                         ts=ts, division=division)
         ref = "event:%d" % event_id
 
-        # 5. 拆节点 + 建边
-        nodes, edges = self._split_nodes(event_id, obs.text, ap)
-        task_title = self._attach_task(event_id, obs.text, nodes, edges)
+        # 5. 拆节点 + 建边。抽取统一走「去掉围栏」后的正文: 围栏里是助手
+        # 举例或贴代码, 不是用户真说过的话, 抽出来就是假事实(实测 person=张三
+        # 就是这么从示例句「…李四当 lead, 张三调走了」里长出来的)。
+        body = _without_fences(obs.text)
+        nodes, edges = self._split_nodes(event_id, body, ap)
+        task_title = self._attach_task(event_id, body, nodes, edges)
         # 自我知识先跑: 同一句话不该同时进语义层和自我知识库
         # (「你以后别用客套话」两边都存一份, 改口时两边都要改, 必然漂移)
-        self_kb, claimed = self._attach_self_knowledge(obs.text)
-        sem = self._attach_semantic(event_id, obs.text, nodes, edges, skip=claimed)
-        self._attach_person_promise(event_id, obs.text, nodes, edges)
+        self_kb, claimed = self._attach_self_knowledge(body)
+        sem = self._attach_semantic(event_id, body, nodes, edges, skip=claimed)
+        self._attach_person_promise(event_id, body, nodes, edges)
 
         # 5b. 倒排索引: 让以后的召回走 O(命中) 而不是 O(全表)
         self.store.index_tokens(event_id, obs.text.strip())
@@ -228,7 +268,8 @@ class Ingestor:
             label = (label or "").strip()
             if not label or len(label) < 2:
                 return None
-            if kind == "person" and label in _NOT_NAME:
+            if kind == "person" and (label in _NOT_NAME
+                                     or any(s in label for s in _NOT_NAME_STEMS)):
                 return None
             nid = self.store.upsert_node(kind, label)
             nodes.append({"id": nid, "kind": kind, "label": label})
@@ -240,8 +281,12 @@ class Ingestor:
             add_node("person", m.group(1) or m.group(2) or m.group(3), "involved")
         for m in _LOCATION.finditer(text):
             add_node("location", m.group(1), "about")
-        for m in _TOPIC.finditer(text):
-            add_node("theme", m.group(1), "about")
+        # 主题只在引号外扫: 「…里长出"关于我的事"」里那个「关于」是在引用别人的话,
+        # 不是"这段经历讲的主题是 X"。
+        for m in _TOPIC.finditer(_QUOTED.sub("", text)):
+            topic = m.group(1).strip()
+            if topic and not topic.startswith(_TOPIC_BAD_HEAD):
+                add_node("theme", topic, "about")
         # 情绪状态也做成节点: "担心"能成为一个召回入口
         if ap.emotion not in ("平静",):
             add_node("state", ap.emotion, "state")

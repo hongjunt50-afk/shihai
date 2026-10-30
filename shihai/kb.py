@@ -118,20 +118,37 @@ _AGENT_DIRECTIVE = ("你别", "以后别", "别再", "别给我", "不要用", "
 _NOW_FIRST_PERSON = ("我叫", "我是", "我习惯", "我在意", "我在乎",
                      "我更喜欢", "我偏好", "我倾向", "我讨厌", "我不喜欢")
 
+# 引号里的内容不是断言主体。「那条"我是谁"烂得越快」含「我是」, 但说的是
+# 别人的一句话, 不是"我是谁"。同理 **加粗** 与 `代码` 里的也不算。
+_QUOTED = re.compile(r"\"[^\"]*\"|“[^”]*”|「[^」]*」|『[^』]*』|`[^`]*`|\*\*[^*]*\*\*")
+# 自述必须落在句首这一小段里。允许「其实/另外/不过」这类极短引导词。
+_SELF_LEAD = 6
+
 
 def auto_kind(text):
     """会话里的自动判定: 这句话是不是「关于我自己」的长期指示?
 
     返回 kind|None。比 classify 严 —— 宁可漏, 不要把它人的世界知识写进人格。
+
+    2026-10-29 修两个假阳性(都是线上库实测到的):
+      · 「我是」当子串搜, 于是「那条"我是谁"烂得越快」被判成 identity 自述;
+        整句进了自我知识库, 投影里读起来像 agent 在复述自己的设计缺陷。
+        修法: 先剥引号/加粗/代码块再判, 且自述必须落在句首一小段内。
+      · 围栏代码块里的**示例对话**(「用户：以后别给我写总结」)被当成真事。
+        那个在 ingest 侧挡(_raw_sentences 跳过围栏), 不在这里。
     """
     s = (text or "").strip()
     if len(s) < 4:
         return None
-    if any(n in s for n in _PROJECT_NOUNS):
+    bare = _QUOTED.sub("", s)
+    if any(n in bare for n in _PROJECT_NOUNS):
         return None
-    if not (any(d in s for d in _AGENT_DIRECTIVE) or any(p in s for p in _NOW_FIRST_PERSON)):
+    head = bare[:_SELF_LEAD]
+    directive = any(d in bare for d in _AGENT_DIRECTIVE)
+    self_desc = any(p in head for p in _NOW_FIRST_PERSON)
+    if not (directive or self_desc):
         return None
-    return classify(s)[0]
+    return classify(bare)[0]
 
 
 # 用户对我说的话, 入自我知识库时要改写成第一人称 —— 「你以后别用客套话」

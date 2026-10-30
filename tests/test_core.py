@@ -768,6 +768,53 @@ def test_speaker_attribution_keeps_agent_narration_out():
             store.close()
 
 
+def test_fenced_examples_are_not_ingested():
+    """围栏代码块里的示例对话不是真事。
+
+    助手回答里常用 ``` 展示示范句（「用户：以后别给我写总结」）。旧的切句器只看
+    标点与换行, 把围栏内那四行当成真实对话抽走 —— 线上库 event#13 实测: 四条
+    示范句全进了语义层与自我知识库, 还把后面正文的说话人归属一起带偏。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            ev = ing.ingest(Observation(
+                "我模拟了四句最典型的话：\n"
+                "```\n"
+                "用户：以后别给我写总结段落。\n"
+                "用户：这个项目以后统一用 duckdb。\n"
+                "```\n"
+                "结果什么都没抽到。\n"), importance_hint=0.6)
+            claims = [c for c, _a in ev.semantic]
+            assert not any("duckdb" in c for c in claims), \
+                "围栏内的示例不该进语义层: %s" % claims
+            texts = [t for _k, t in ev.selfkb]
+            assert not any("写总结段落" in t for t in texts), \
+                "围栏内的示例不该进自我知识库: %s" % texts
+            # 围栏外的正文仍要正常处理
+            ev2 = ing.ingest(Observation("用户：以后别给我写总结段落。"), importance_hint=0.6)
+            assert any("写总结段落" in t for _k, t in ev2.selfkb), "围栏外的真话该收"
+        finally:
+            store.close()
+
+
+def test_auto_kind_ignores_quoted_and_mid_sentence():
+    """「我是」当子串搜会把别人的引用判成自述。
+
+    线上实测: 助手写「那条"我是谁"烂得越快」被判成 identity 自述, 整句进了
+    自我知识库, 投影里读起来像 agent 在复述自己的设计缺陷。
+    """
+    from shihai.kb import auto_kind
+    assert auto_kind('也就是说那条"我是谁"烂得越快——正好打击最该守住的场景') is None
+    assert auto_kind('这条"我是谁"烂得越快') is None
+    assert auto_kind("这句话的意思其实是我叫小海") is None, \
+        "自述要在句首, 出现「其实/也就是说」这类引导词后的话是在转述别人"
+    assert auto_kind("报告里写着我叫小海") is None, "转述他人写的东西不算自述"
+    # 真自述仍要收
+    assert auto_kind("我叫小海") == "identity"
+    assert auto_kind("我习惯先看数据再下判断") == "style"
+
+
 def test_edge_is_idempotent():
     """同 (src,dst,rel) 只留一条边。旧版 31 条边里只有 2 条是不同的。"""
     s = Store(":memory:")
@@ -817,9 +864,9 @@ def test_person_extraction_rejects_adjectives():
     """人名抽取不能把「直接说结论」里的副词、「结论说：」里的名词当人名。
 
     两层防护都要测: 正则层挡住「说结论」(动词后不跟"我"),
-    _NOT_NAME 层挡住「结论说我」这种形似人名的常用词。
+    _NOT_NAME / _NOT_NAME_STEMS 层挡住「结论先」「结论说我」这类形似人名的常用词。
     """
-    from shihai.ingest import _PERSON, _NOT_NAME
+    from shihai.ingest import _PERSON, _NOT_NAME, _NOT_NAME_STEMS
     for text, expect in [
         ("最大的问题是我没先确认", []),
         ("直接说结论就行", []),
@@ -829,15 +876,43 @@ def test_person_extraction_rejects_adjectives():
         got = [m.group(1) or m.group(2) or m.group(3) for m in _PERSON.finditer(text)]
         assert got == expect, "%r 抽出 %s, 期望 %s" % (text, got, expect)
     assert "结论" in _NOT_NAME and "最大" in _NOT_NAME, "_NOT_NAME 应含常用词"
-    assert "张三" not in _NOT_NAME
+    assert "结论" in _NOT_NAME_STEMS
+    assert "张三" not in _NOT_NAME and "张三" not in _NOT_NAME_STEMS
 
-    # 正则能过、但靠 _NOT_NAME 拦下的那一类: 必须真的不进图
+    # 正则能过、但靠名单拦下的那一类: 必须真的不进图
     with tempfile.TemporaryDirectory() as tmp:
         store, ing, eng, life, pers = build(tmp)
         try:
-            ev = ing.ingest(Observation("结论说我明天再改一版方案。"))
-            persons = [n["label"] for n in ev.nodes if n["kind"] == "person"]
-            assert persons == [], "「结论说我…」不该长出 person 节点: %s" % persons
+            for text in ("结论说我明天再改一版方案。", "结论先说：这个插件没坏过。"):
+                ev = ing.ingest(Observation(text))
+                persons = [n["label"] for n in ev.nodes if n["kind"] == "person"]
+                assert persons == [], "%r 不该长出 person 节点: %s" % (text, persons)
+        finally:
+            store.close()
+
+
+def test_topic_extraction_rejects_fragments():
+    """主题节点不能是句子碎片。它们会喂给 _distill 与 free mode 选题, 脏了会一路污染。
+
+    真实库里攒过 theme=在喂料端 / 的现成答案 / 要顺便修掉 / 造成的遗忘 ——
+    都来自把「问题/讨论」也当触发词, 以及捕获段以「的/在/要」开头。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store, ing, eng, life, pers = build(tmp)
+        try:
+            for text in ("问题造成的遗忘是主要问题。", "本该在第一个小时内解决。",
+                         '会话流程里没有任何自动路径从"关于我的事"里长出来。'):
+                ev = ing.ingest(Observation(text))
+                themes = [n["label"] for n in ev.nodes if n["kind"] == "theme"]
+                assert themes == [], "%r 不该长出 theme 节点: %s" % (text, themes)
+            # 「关于X」抓到的主题允许带尾巴词(「记忆系统的问题」仍是有效主题),
+            # 只要求它不是结构助词开头的碎片
+            ev = ing.ingest(Observation("我们讨论的关于记忆系统的问题。"))
+            themes = [n["label"] for n in ev.nodes if n["kind"] == "theme"]
+            assert themes == ["记忆系统的问题"], "抓到的是有效主题, 只是带尾巴: %s" % themes
+            ev = ing.ingest(Observation("关于长护险核验引擎的设计需要再讨论。"))
+            themes = [n["label"] for n in ev.nodes if n["kind"] == "theme"]
+            assert themes and themes[0].startswith("长护险"), "显式「关于X」仍要抽: %s" % themes
         finally:
             store.close()
 
